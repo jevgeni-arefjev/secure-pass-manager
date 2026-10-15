@@ -7,17 +7,19 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** scaffolding only. The crates are empty stubs; nothing is implemented yet.
+> **Status:** scaffolding only. Crypto algorithms are chosen and their dependencies added to `vault-core`, but the crates are still empty stubs; nothing is implemented yet.
 
 ## Project layout
 
 ```
 .
 ├── Cargo.toml              # workspace root
+├── Cargo.lock              # pinned dependency versions
+├── docs/agents/            # notes for coding agents: issue tracker, triage labels, domain docs
 ├── vault-core/             # shared library, no I/O front end
 │   └── src/
 │       ├── lib.rs
-│       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (algorithms TBD)
+│       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
 │       ├── storage.rs      # Storage: SQL schema, parameterized queries, header + ciphertext rows
 │       ├── audit.rs        # Audit log: structured events, never secrets
 │       ├── backup.rs       # Backup: ciphertext-only export
@@ -61,7 +63,7 @@ cargo run -p vault-cli -- <command> # run the `vault` binary, e.g. `cargo run -p
 ./target/release/vault <command>    # or run the built binary directly
 ```
 
-Planned commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-planned-commands).
+Planned commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-planned-commands). `vault unlock` will open an interactive `vault>` session; the vault keys live only in that process. Secrets such as the master password and stored passwords are entered only through hidden prompts, never as arguments.
 
 ### Tests and checks
 

@@ -14,7 +14,9 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 - SQLite for both CLI and web; storage behind a trait so the backend stays swappable.
 - MVP is a single-user vault, but auth/unlock code lives in `vault-core::user` so multi-user extends it.
 - Core stays as modules in one crate, not separate crates.
-- Crypto algorithms and Argon2 memory cost undecided; candidates listed in `vault-core/src/crypto.rs`. Do not pick one without asking.
+- Crypto: Argon2id (m=256 MiB, t=3, p=1) for the KEK, with KDF params stored in the vault header; XChaCha20-Poly1305 for both the vault-key wrap and the body; HKDF-SHA-256 for the body key. Do not change algorithms or params without asking.
+- CLI session is an interactive shell: `vault unlock` opens a `vault>` prompt and keys live only in that process, never on disk.
+- Secrets are entered only via hidden terminal prompts (e.g. `vault save <name>` prompts for the password).
 - Web is a local demo only (no Vercel/serverless: design needs a long-lived process holding session keys).
 
 ## General rules
@@ -35,3 +37,17 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 - [ ] Structured logging of key events and secure error handling.
 - [ ] Per-user access control enforced on every record operation (User-management module).
 - [ ] Test cases written and passing, including input-validation edge cases and memory handling checks.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (jevgeni-arefjev/secure-pass-manager), managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

@@ -67,8 +67,8 @@ Body is a compressed JSON of all entries *(may be changed later)*, padded to 4 K
 
 A personal vault key exists for every password, personal body key for every entry. Master password (or MFA/SSO) decrypts vault key. Vault key decrypts body key, which deciphers JSON block.
 
-1) Argon2id (m=256 MiB, t=3, p=1) derives a KEK from the master password it was chosen to prevent brute force attacks against encrypted vault;
-2) KEK wraps a random 32-byte vault key; the vault key derives a body key via HKDF-SHA-256. AES / ChaCha20 for the wrap and the body. The format is KDF-agnostic and specific algorythm will be decided upon later. Details of this scheme may likely be changed in the future.
+1) Argon2id (m=256 MiB, t=3, p=1) derives a KEK from the master password it was chosen to prevent brute force attacks against encrypted vault. The KDF params are stored in the vault header, so they can be raised later without breaking existing vaults;
+2) KEK wraps a random 32-byte vault key; the vault key derives a body key via HKDF-SHA-256. XChaCha20-Poly1305 is used for both the wrap and the body (one AEAD, 192-bit random nonces). The format is KDF-agnostic. Details of this scheme may likely be changed in the future.
 3) Master password and body key can be rotated independently.
 
 **Programming language - Rust.** It was chosen because it lets you control memory directly the way C does, but stops whole categories of memory bugs the way Java or Go do. I personally, don't have a lot of experience with Rust, and my assumption is that, long-term, avoiding hand-managing memory will result in safer code, as there will be less opportunities for human error bugs.
@@ -116,13 +116,14 @@ They might forget to close the session, accidentally copy or display their entir
 Since the app currently doesn't have a name, example name is `vault`.
 
 ```
-vault init | unlock | lock        # create a vault; start / end session
-vault list                        # metadata only, no secrets
+vault init | unlock | lock        # create a vault; start / end session (`unlock` opens an interactive `vault>` shell)
 vault get <name> [--show|--copy]  # reveal or copy one field, e.g. `vault get github`
-vault save <name> <pass>          # Save new password, or replace the old one
-vault list                        # Show all existing entries (w/o secrets)
+vault save <name>                 # Save new password (hidden prompt), or replace the old one
+vault list                        # Show all existing entries, metadata only (w/o secrets)
 vault rm <name>                   # remove a secret
 vault gen [--length 24]           # generate a text password
 vault export-cypher <path>        # ciphertext copy
 ```
 as well as others, e.g. to view logs.
+
+The session is an interactive shell: `vault unlock` prompts for the master password and opens a `vault>` prompt where the commands above run. Vault keys live only in that process and are never written to disk; `lock`, exit or idle timeout wipes them. Secrets are never accepted as arguments, only through hidden prompts.
