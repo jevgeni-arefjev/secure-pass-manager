@@ -6,29 +6,29 @@ GUI document: `web-app-security.md`
 
 This app is:
 - Desktop native
-- Multi-user on single device (though no teams or secret sharing)
+- Multi-user on single device: each user has their own vault file, identified by its vaultname (no teams or secret sharing)
 - Fully local (no automatic backuping plan yet, only ciphertext export)
-- Authenticated with a master password (later maybe with MFA, Google SSO or similar)
+- Unlocked with a vaultname and master password (later maybe with MFA, Google SSO or similar)
 
 ## 2. Architecture
 
-The app consists of 6 modules with responsibilities split between them. The goal of this app is to securely store passwords and protect against memory leaks, injection attacks and other cryptographic attacks.
+The app consists of 6 modules with responsibilities split between them. The goal of this app is to securely store secrets and protect against memory leaks, injection attacks and other cryptographic attacks.
 
 | Module | Responsibility |
 | --- | --- |
-| CLI | Command parsing, terminal output, one-entry reveal, clipboard |
-| User management | Password prompt, KDF params, unlock/lock state, session lifetime |
+| CLI | Command parsing, terminal output, one-secret reveal, clipboard |
+| User management | Vaultname and master password prompt, KDF params, unlock/lock state, session lifetime |
 | Encryption | Encryption/decryption, key derivation, key wrap, nonces, salts; **handles plaintext in memory** |
-| Storage | SQL db management, schemas |
-| Audit log	| Structured events - logins, unlocks, vault changes |
-| Backup | Ciphertext-only export |
+| Storage | Vault files (SQLite), schemas |
+| Audit log	| Structured events - unlocks, failed unlock attempts, locks, vault changes |
+| Backup | Ciphertext-only export of the user's vault |
 
 ```mermaid
 flowchart LR
   CLI --> UM[User management] -->|master password| ENC[Encryption]
-  UM[User management] -->|reveal entry| ENC[Encryption]
+  UM[User management] -->|reveal field| ENC[Encryption]
   ENC -->|ciphertext| ST[(Storage / SQL)] -->|header + ciphertext| ENC
-  ENC -->|entries| CLI; UM --> LOG[Audit log]; ST -->|ciphertext copy| BK[Backup]
+  ENC -->|secrets| CLI; UM --> LOG[Audit log]; ST -->|ciphertext copy| BK[Backup]
 ```
 
 
@@ -40,32 +40,34 @@ sequenceDiagram
   participant UM as User mgmt
   participant ENC as Encryption
   participant ST as Storage
-  CLI->>UM: master password (terminal prompt)
-  UM->>ST: load vault header
+  CLI->>UM: vaultname + master password (terminal prompt)
+  UM->>ST: open the vault file for that vaultname, load header
   ST-->>UM: KDF id, params, wrapped key
   UM->>ENC: password + params
   ENC->>ENC: derive KEK, unwrap vault key
   ST-->>ENC: ciphertext body
-  ENC-->>CLI: decrypted entries (held for the session)
-  CLI->>CLI: reveal password on request
-  CLI->>ENC: changed password
+  ENC-->>CLI: decrypted secrets (held for the session)
+  CLI->>CLI: reveal one secret's hidden fields on request
+  CLI->>ENC: changed secret
   ENC->>ST: new ciphertext
   ST->>ST: change ptr to new ciphertext 
 ```
 
 ## 3. Design decisions
 
-**Vault format.** Vault is a single db row per user: plaintext header + encrypted body (all passwords), header authenticated as associated data. This way it doesn't leak entry count or existence of specific entry (e.g. existence of github account).
+**Vault format.** Each user's vault is a separate SQLite file, named after its vaultname and created by `vault init`. The file name is the plain vaultname (not a hash), so a vault can still be found if its name is half-remembered; the contents stay encrypted. It holds a plaintext header + encrypted body (all secrets), header authenticated as associated data. This way it doesn't leak the number of secrets or existence of a specific secret (e.g. existence of a github account). A secret is everything needed to access one service: its credentials and metadata (title, username, password, URL, tags, ...).
 
-It is also impossible to read other users' entries, as they will not decrypt even if somehow obtained.
+It is also impossible to read other users' secrets: a session only ever opens the one vault it unlocked, and another user's file will not decrypt even if somehow obtained.
 
 Header contains format version, KDF id and params, salt, wrapped vault key, revision counter, body nonce, etc.
 
-Body is a compressed JSON of all entries *(may be changed later)*, padded to 4 KiB, rewritten whole on every save. Per-entry encryption leaks entry count and sizes and multiplies nonce management, wchih gains nothing in performance, since the app is so small.
+Body is a compressed JSON of all secrets *(may be changed later)*, padded to 4 KiB, rewritten whole on every save. Per-secret encryption leaks the number of secrets and their sizes and multiplies nonce management, wchih gains nothing in performance, since the app is so small.
+
+**Unlock.** The master password is never stored, not even as a hash. Unlock derives the KEK and tries to unwrap the vault key; a failed tag check means a wrong password. A separate password hash would be a second offline brute-force target while adding nothing the wrapped key doesn't already prove.
 
 **Cryptographic scheme:**
 
-A personal vault key exists for every password, personal body key for every entry. Master password (or MFA/SSO) decrypts vault key. Vault key decrypts body key, which deciphers JSON block.
+Each vault has one random vault key, and one body key derived from it. Master password (or MFA/SSO) decrypts vault key. Vault key derives body key, which deciphers JSON block.
 
 1) Argon2id (m=256 MiB, t=3, p=1) derives a KEK from the master password it was chosen to prevent brute force attacks against encrypted vault. The KDF params are stored in the vault header, so they can be raised later without breaking existing vaults;
 2) KEK wraps a random 32-byte vault key; the vault key derives a body key via HKDF-SHA-256. XChaCha20-Poly1305 is used for both the wrap and the body (one AEAD, 192-bit random nonces). The format is KDF-agnostic. Details of this scheme may likely be changed in the future.
@@ -78,11 +80,11 @@ A personal vault key exists for every password, personal body key for every entr
 
 ### Security Assumptions
 
-- **An attacker has access to encrypted vault db.**
+- **An attacker has access to the encrypted vault files.**
 - **An attacker has access to the application source code.**
-- **An attacker can use the same device (as a different vault user) and read memory on target device after the vault has been unlocked and used and is locked again.**
+- **An attacker can use the same device (as a different user) and read memory on target device after the vault has been unlocked and used and is locked again.**
 - **App user might not have the best password hygiene or be a proficient PC user.**
-They might forget to close the session, accidentally copy or display their entire vault, or use an easy password.
+They might forget to lock the vault, accidentally copy or display all their secrets, or use an easy password.
 
 ### Out of scope - not covered threats:
 
@@ -93,37 +95,39 @@ They might forget to close the session, accidentally copy or display their entir
 
 | Surface | Threat | Mitigation |
 | --- | --- | --- |
-| Master password | Offline brute force against a stolen vault | Single encrypt/decrypt uses 256 MiB of memory, so brute frocing is not an option |
+| Master password | Offline brute force against a stolen vault | Single encrypt/decrypt uses 256 MiB of memory, so brute frocing is not an option; no password hash is stored that could be attacked instead |
 | Master password | Weak password chosen by the user | Use strength meter, length rules, reject common passwords |
 | Vault at rest | File stolen from disk, backup or cloud sync | Whole body encrypted under a random vault key; only the header is readable |
 | Vault at rest | Header tampering | Header is authenticated as associated data so altered parameters fail the tag check |
-| Vault at rest | Rollback to an older vault to restore a revoked password | Needs to be addressed with tag versioning |
+| Vault at rest | Rollback to an older vault to restore a revoked secret | Needs to be addressed with tag versioning |
 | Vault at rest | Corruption or crash mid-write losing the vault | Write to a temp file, fsync, atomic rename; keep the previous version as a backup |
  |Vault at rest | Malicious crafted input reaching the parser or a query | #![forbid(unsafe_code)] and parameterized SQL; header parser fuzzed |
+| Vault at rest | Vaultname used as a file name: path traversal or overwriting another file | Vaultnames allowlisted (restricted charset and length); vault path is built only inside the vault directory; `init` refuses an existing vaultname |
+| Vault at rest | Vault file names reveal vaultnames to other local users | Accepted: keeps a vault recoverable when its name is forgotten; the contents stay encrypted |
 | Vault in memory | Memory dump or core file of a running process | Vault key in locked pages, zeroed on lock; core dumps disabled |
-| Vault in memory | Key paged to swap or a hibernation file | `mlock` the key material and the decrypted entry set, no swap allocations |
+| Vault in memory | Key paged to swap or a hibernation file | `mlock` the key material and the decrypted secrets, no swap allocations |
 | Vault in memory | Session left unattended | Auto-lock on idle timeout, on screen lock, on suspend |
 | Vault in memory | Runtime copies of secrets | In Rust, `zeroize`/`secrecy`; no implicit copies of secret types, `#[must_use]` on every AEAD output (so tag failure is not ignored) |
-| Access control | One user reading or editing another's records | Every query scoped by session user id |
-| Interface | Secrets in shell history / process arguments | Never accept a master password as an argument or env variable; prompt on the terminal with echo disabled |
-| Interface | Passwords in terminal scrollback | Passwords are only revealed one at a time on request, so this threat exists, but is minimized |
-| Interface | Secrets in redirected output or a piped log | Refuse to write secret fields when stdout is not a TTY (maybe unless an explicit `--raw` flag is passed) |
+| Access control | One user reading or editing another's secrets | Each user's vault is a separate file; a session only opens the vault it unlocked, and another vault doesn't decrypt without its master password |
+| Interface | Secrets in shell history / process arguments | Never accept a master password or hidden field as an argument or env variable; prompt on the terminal with echo disabled |
+| Interface | Secrets in terminal scrollback | Hidden fields are masked by default and only unmasked with `--show`, for one secret at a time, so this threat exists, but is minimized |
+| Interface | Secrets in redirected output or a piped log | Refuse to write hidden fields when stdout is not a TTY (maybe unless an explicit `--raw` flag is passed) |
 | Interface | Modified header content received by the terminal | Validate, strip or escape control sequences before printing any stored field or evaluating; |
-| Interface | Timing or error msg attacks | One generic unlock failure message and a constant minimum delay |
+| Interface | Timing or error msg attacks | One generic unlock failure message and a constant minimum delay, whether or not the vaultname exists |
 
 ## 5. Planned commands
 
 Since the app currently doesn't have a name, example name is `vault`.
 
 ```
-vault init | unlock | lock        # create a vault; start / end session (`unlock` opens an interactive `vault>` shell)
-vault get <name> [--show|--copy]  # reveal or copy one field, e.g. `vault get github`
-vault save <name>                 # Save new password (hidden prompt), or replace the old one
-vault list                        # Show all existing entries, metadata only (w/o secrets)
-vault rm <name>                   # remove a secret
+vault init | unlock | lock        # create a vault (asks for a vaultname); start / end session (`unlock` opens an interactive `vault>` shell)
+vault get <secret> [--show|--copy] # print a secret by its title, hidden fields masked; `--show` unmasks them; `--copy` copies the password to the clipboard
+vault save <secret>               # Save new secret (hidden fields via hidden prompt), or replace the old one
+vault list                        # Show all secrets, non-hidden fields only
+vault rm <secret>                 # remove a secret
 vault gen [--length 24]           # generate a text password
-vault export-cypher <path>        # ciphertext copy
+vault export-cypher <path>        # ciphertext copy of your vault file
 ```
 as well as others, e.g. to view logs.
 
-The session is an interactive shell: `vault unlock` prompts for the master password and opens a `vault>` prompt where the commands above run. Vault keys live only in that process and are never written to disk; `lock`, exit or idle timeout wipes them. Secrets are never accepted as arguments, only through hidden prompts.
+The session is an interactive shell: `vault unlock` prompts for the vaultname and master password and opens a `vault>` prompt where the commands above run. Vault keys live only in that process and are never written to disk; `lock`, exit or idle timeout wipes them. Hidden fields are never accepted as arguments, only through hidden prompts.

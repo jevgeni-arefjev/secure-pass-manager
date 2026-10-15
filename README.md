@@ -15,16 +15,18 @@ It is a password manager with one shared Rust core and two front ends:
 .
 ├── Cargo.toml              # workspace root
 ├── Cargo.lock              # pinned dependency versions
+├── CONTEXT.md              # domain glossary: vault, vaultname, secret, hidden field, unlock/lock
 ├── docs/agents/            # notes for coding agents: issue tracker, triage labels, domain docs
+├── docs/adr/               # architecture decision records
 ├── vault-core/             # shared library, no I/O front end
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
-│       ├── storage.rs      # Storage: SQL schema, parameterized queries, header + ciphertext rows
+│       ├── storage.rs      # Storage: one SQLite file per user's vault (header + encrypted body), parameterized queries
 │       ├── audit.rs        # Audit log: structured events, never secrets
-│       ├── backup.rs       # Backup: ciphertext-only export
-│       └── user.rs         # User management: master password, unlock/lock, session (single user in MVP)
-├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-entry reveal
+│       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
+│       └── user.rs         # User management: vaultname + master password, unlock/lock, session (single user in MVP)
+├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   └── src/main.rs
 │
 │   # planned, not created yet
@@ -63,7 +65,7 @@ cargo run -p vault-cli -- <command> # run the `vault` binary, e.g. `cargo run -p
 ./target/release/vault <command>    # or run the built binary directly
 ```
 
-Planned commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-planned-commands). `vault unlock` will open an interactive `vault>` session; the vault keys live only in that process. Secrets such as the master password and stored passwords are entered only through hidden prompts, never as arguments.
+Planned commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-planned-commands). `vault unlock` will ask for a vaultname and master password and open an interactive `vault>` session; the vault keys live only in that process. The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments.
 
 ### Tests and checks
 
