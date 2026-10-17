@@ -35,6 +35,8 @@ These are deliberate design choices that differ from `course-project-requirement
 - Do not modify `course-project-requirements.md`, `secure-password-manager.md`, `web-app-security.md` unless EXPLICITLY asked.
 - If requirements cause conflict, prefer ICS0022 course requirements.
 - No `unsafe` (forbidden workspace-wide). Secrets never in logs, args, env vars or error messages.
+- Create docstrings for every function that you write. Docstrings should be brief, but mention important points for security and have usage examples.
+- Always stick to the current coding best practices that result in readable, scalable and maintainable codebase. Never sacrifice long-term maintainability for faster development.
 - Keep `README.md` layout and build instructions in sync with the code.
 
 ## Timeline
