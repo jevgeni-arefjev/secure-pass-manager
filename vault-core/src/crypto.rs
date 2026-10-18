@@ -1,8 +1,9 @@
 //! Encryption module: key derivation, vault key wrap, body encryption/decryption,
 //! nonces and salts.
 //!
-//! The only module that handles plaintext secrets; everything sensitive must be
-//! zeroized after use.
+//! Decrypts the body and hands the plaintext to `session`, which owns the secret
+//! model; crypto itself never parses secrets. Everything sensitive must be zeroized
+//! after use.
 //!
 //! Crypto functions used (RustCrypto crate in brackets):
 //!
@@ -18,4 +19,5 @@
 //! Key wrap: XChaCha20-Poly1305 over the vault key (same AEAD as the body).
 //! Subkey derivation (vault key -> body key): HKDF-SHA-256 [`hkdf`].
 //! Randomness: OS CSPRNG [`getrandom`].
-//! Secret memory: [`zeroize`]; page locking (`mlock`) via e.g. [`memsec`].
+//! Secret memory: [`zeroize`]; page locking (`mlock`) of key buffers via a crate with a
+//! safe API (no `unsafe` calls in this crate).

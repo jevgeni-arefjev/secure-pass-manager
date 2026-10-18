@@ -17,18 +17,19 @@ The app consists of 6 modules with responsibilities split between them. The goal
 | Module | Responsibility |
 | --- | --- |
 | CLI | Command parsing, terminal output, one-secret reveal, clipboard |
-| User management | Vaultname and master password prompt, KDF params, unlock/lock state, session lifetime |
-| Encryption | Encryption/decryption, key derivation, key wrap, nonces, salts; **handles plaintext in memory** |
+| Session | Unlock/lock state and session lifetime; holds the decrypted secrets, reveals them one at a time; owns the secret model and its serialization; **handles plaintext in memory** |
+| Encryption | Encryption/decryption, key derivation, key wrap, nonces, salts, padding, header encoding; passes decrypted plaintext only to Session |
 | Storage | Vault files (SQLite), schemas |
 | Audit log	| Structured events - unlocks, failed unlock attempts, locks, vault changes |
 | Backup | Ciphertext-only export of the user's vault |
 
 ```mermaid
 flowchart LR
-  CLI --> UM[User management] -->|master password| ENC[Encryption]
-  UM[User management] -->|reveal field| ENC[Encryption]
-  ENC -->|ciphertext| ST[(Storage / SQL)] -->|header + ciphertext| ENC
-  ENC -->|secrets| CLI; UM --> LOG[Audit log]; ST -->|ciphertext copy| BK[Backup]
+  CLI -->|vaultname + master password| SE[Session] -->|master password, plaintext| ENC[Encryption]
+  ENC -->|plaintext| SE
+  SE -->|one revealed secret| CLI
+  ENC -->|header + ciphertext| ST[(Storage / SQL)] -->|header + ciphertext| ENC
+  SE --> LOG[Audit log]; ST -->|ciphertext copy| BK[Backup]
 ```
 
 
@@ -37,20 +38,22 @@ flowchart LR
 ```mermaid
 sequenceDiagram
   participant CLI as CLI
-  participant UM as User mgmt
+  participant SE as Session
   participant ENC as Encryption
   participant ST as Storage
-  CLI->>UM: vaultname + master password (terminal prompt)
-  UM->>ST: open the vault file for that vaultname, load header
-  ST-->>UM: KDF id, params, wrapped key
-  UM->>ENC: password + params
-  ENC->>ENC: derive KEK, unwrap vault key
-  ST-->>ENC: ciphertext body
-  ENC-->>CLI: decrypted secrets (held for the session)
-  CLI->>CLI: reveal one secret's hidden fields on request
-  CLI->>ENC: changed secret
-  ENC->>ST: new ciphertext
-  ST->>ST: change ptr to new ciphertext 
+  CLI->>SE: vaultname + master password (terminal prompt)
+  SE->>ST: open the vault file for that vaultname
+  ST-->>SE: header + ciphertext body
+  SE->>ENC: header + master password
+  ENC->>ENC: check KDF params bounds, derive KEK, unwrap vault key
+  SE->>ENC: vault key + ciphertext body
+  ENC-->>SE: plaintext body (held for the session)
+  CLI->>SE: reveal one secret
+  SE-->>CLI: that secret, hidden fields masked unless revealed
+  CLI->>SE: changed secret
+  SE->>ENC: new plaintext body
+  ENC->>ST: new header + ciphertext
+  ST->>ST: atomically replace the vault file
 ```
 
 ## 3. Design decisions
@@ -59,9 +62,9 @@ sequenceDiagram
 
 It is also impossible to read other users' secrets: a session only ever opens the one vault it unlocked, and another user's file will not decrypt even if somehow obtained.
 
-Header contains format version, KDF id and params, salt, wrapped vault key, revision counter, body nonce, etc.
+Header contains format version, vaultname, KDF id and params, salt, wrap nonce, wrapped vault key, revision counter, body nonce. The vaultname is authenticated too, so it can only be changed through a dedicated rename (ADR-0003).
 
-Body is a compressed JSON of all secrets *(may be changed later)*, padded to 4 KiB, rewritten whole on every save. Per-secret encryption leaks the number of secrets and their sizes and multiplies nonce management, wchih gains nothing in performance, since the app is so small.
+Body is a JSON of all secrets *(may be changed later)*, padded to 4 KiB, rewritten whole on every save. Per-secret encryption leaks the number of secrets and their sizes and multiplies nonce management, wchih gains nothing in performance, since the app is so small.
 
 **Unlock.** The master password is never stored, not even as a hash. Unlock derives the KEK and tries to unwrap the vault key; a failed tag check means a wrong password. A separate password hash would be a second offline brute-force target while adding nothing the wrapped key doesn't already prove.
 
@@ -69,9 +72,9 @@ Body is a compressed JSON of all secrets *(may be changed later)*, padded to 4 K
 
 Each vault has one random vault key, and one body key derived from it. Master password (or MFA/SSO) decrypts vault key. Vault key derives body key, which deciphers JSON block.
 
-1) Argon2id (m=256 MiB, t=3, p=1) derives a KEK from the master password it was chosen to prevent brute force attacks against encrypted vault. The KDF params are stored in the vault header, so they can be raised later without breaking existing vaults;
+1) Argon2id (m=256 MiB, t=3, p=1) derives a KEK from the master password it was chosen to prevent brute force attacks against encrypted vault. The KDF params are stored in the vault header and bounds-checked before deriving: floor 19 MiB, t=2, p=1 (OWASP minimum), ceiling 256 MiB, t=3, p=1. New vaults use the ceiling; raising params later means raising the ceiling, and existing vaults keep working;
 2) KEK wraps a random 32-byte vault key; the vault key derives a body key via HKDF-SHA-256. XChaCha20-Poly1305 is used for both the wrap and the body (one AEAD, 192-bit random nonces). The format is KDF-agnostic. Details of this scheme may likely be changed in the future.
-3) Master password and body key can be rotated independently.
+3) Changing the master password always rotates the vault key: a new random vault key (and with it a new body key, derived from it) re-encrypts the body, and a fresh salt derives a new KEK that wraps it. A copy of the vault taken before the change therefore never decrypts later versions, even with the old master password.
 
 **Programming language - Rust.** It was chosen because it lets you control memory directly the way C does, but stops whole categories of memory bugs the way Java or Go do. I personally, don't have a lot of experience with Rust, and my assumption is that, long-term, avoiding hand-managing memory will result in safer code, as there will be less opportunities for human error bugs.
 
@@ -95,17 +98,18 @@ They might forget to lock the vault, accidentally copy or display all their secr
 
 | Surface | Threat | Mitigation |
 | --- | --- | --- |
-| Master password | Offline brute force against a stolen vault | Single encrypt/decrypt uses 256 MiB of memory, so brute frocing is not an option; no password hash is stored that could be attacked instead |
+| Master password | Offline brute force against a stolen vault | New vaults use Argon2id with 256 MiB of memory per guess, and no vault below the OWASP floor (19 MiB, t=2) is accepted, so brute forcing is not an option; no password hash is stored that could be attacked instead |
+| Master password | Old master password leaked together with an old copy of the vault | Accepted: it decrypts only that old snapshot; every master password change rotates the vault key, so later versions stay protected |
 | Master password | Weak password chosen by the user | Use strength meter, length rules, reject common passwords |
 | Vault at rest | File stolen from disk, backup or cloud sync | Whole body encrypted under a random vault key; only the header is readable |
-| Vault at rest | Header tampering | Header is authenticated as associated data so altered parameters fail the tag check |
-| Vault at rest | Rollback to an older vault to restore a revoked secret | Needs to be addressed with tag versioning |
+| Vault at rest | Header tampering | Header is authenticated as associated data so altered parameters fail the tag check; KDF params are bounds-checked before deriving, so a crafted header can't force a huge allocation |
+| Vault at rest | Rollback: an older copy of the vault file put in place of the current one, bringing back a rotated password or dropping newer secrets | Accepted: detection needs trusted state the attacker can't roll back at the same time (hardware counter, remote server or a per-device state file), which is out of scope. An attacker with write access to the vault directory can usually replace the binary anyway. The authenticated revision counter only orders backups and writes; it is not rollback protection |
 | Vault at rest | Corruption or crash mid-write losing the vault | Write to a temp file, fsync, atomic rename; keep the previous version as a backup |
  |Vault at rest | Malicious crafted input reaching the parser or a query | #![forbid(unsafe_code)] and parameterized SQL; header parser fuzzed |
 | Vault at rest | Vaultname used as a file name: path traversal or overwriting another file | Vaultnames allowlisted (restricted charset and length); vault path is built only inside the vault directory; `init` refuses an existing vaultname |
 | Vault at rest | Vault file names reveal vaultnames to other local users | Accepted: keeps a vault recoverable when its name is forgotten; the contents stay encrypted |
 | Vault in memory | Memory dump or core file of a running process | Vault key in locked pages, zeroed on lock; core dumps disabled |
-| Vault in memory | Key paged to swap or a hibernation file | `mlock` the key material and the decrypted secrets, no swap allocations |
+| Vault in memory | Key paged to swap or a hibernation file | `mlock` the key material and the decrypted secrets, no swap allocations; if the decrypted body exceeds `RLIMIT_MEMLOCK` it falls back to zeroize-only, with a warning logged |
 | Vault in memory | Session left unattended | Auto-lock on idle timeout, on screen lock, on suspend |
 | Vault in memory | Runtime copies of secrets | In Rust, `zeroize`/`secrecy`; no implicit copies of secret types, `#[must_use]` on every AEAD output (so tag failure is not ignored) |
 | Access control | One user reading or editing another's secrets | Each user's vault is a separate file; a session only opens the vault it unlocked, and another vault doesn't decrypt without its master password |

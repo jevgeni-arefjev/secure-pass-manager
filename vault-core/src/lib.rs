@@ -6,5 +6,5 @@
 pub mod audit;
 pub mod backup;
 pub mod crypto;
+pub mod session;
 pub mod storage;
-pub mod user;

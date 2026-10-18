@@ -12,7 +12,7 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 ## Decisions
 
 - SQLite for both CLI and web; storage behind a trait so the backend stays swappable.
-- Each user's vault is a separate SQLite file named after its vaultname (`vault init` asks for it). MVP handles one user; unlock code lives in `vault-core::user` so multi-user extends it.
+- Each user's vault is a separate SQLite file named after its vaultname (`vault init` asks for it). MVP handles one user; unlock code lives in `vault-core::session` so multi-user extends it.
 - No master password hash is stored: unlock succeeds only if the vault key unwraps.
 - Core stays as modules in one crate, not separate crates.
 - Crypto: Argon2id (m=256 MiB, t=3, p=1) for the KEK, with KDF params stored in the vault header; XChaCha20-Poly1305 for both the vault-key wrap and the body; HKDF-SHA-256 for the body key. Do not change algorithms or params without asking.
@@ -48,7 +48,7 @@ These are deliberate design choices that differ from `course-project-requirement
 - [ ] Application served over TLS in the development setup.
 - [ ] Full input validation and sanitization on all fields.
 - [ ] Structured logging of key events and secure error handling.
-- [ ] Per-user access control: a session can only open the vault it unlocked (User-management module; see Deviations).
+- [ ] Per-user access control: a session can only open the vault it unlocked (Session module; see Deviations).
 - [ ] Test cases written and passing, including input-validation edge cases and memory handling checks.
 
 ## Agent skills

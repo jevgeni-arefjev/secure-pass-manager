@@ -19,7 +19,7 @@ This app consists off:
 ```mermaid
 flowchart LR
   TS["TypeScript client (browser)"] -->|"HTTPS + session cookie + CSRF token"| SRV["vault-web: TLS, session, authz"]
-  SRV --> UM[User management] --> ENC[Encryption] --> ST[(Storage / SQL)]
+  SRV --> SE[Session] --> ENC[Encryption] --> ST[(Storage / SQL)]
   SRV -->|"masked secrets; one hidden field per request"| TS
 ```
 

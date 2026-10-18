@@ -25,7 +25,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── storage.rs      # Storage: one SQLite file per user's vault (header + encrypted body), parameterized queries
 │       ├── audit.rs        # Audit log: structured events, never secrets
 │       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
-│       └── user.rs         # User management: vaultname + master password, unlock/lock, session (single user in MVP)
+│       └── session.rs      # Session: unlock/lock, holds decrypted secrets, reveals one at a time (single user in MVP)
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   └── src/main.rs
 │
@@ -42,7 +42,7 @@ How the modules map to the specs:
 | Storage | `vault-core::storage` | ICS0022 (reused by ICS0027) |
 | Audit log | `vault-core::audit` | ICS0022 (reused by ICS0027) |
 | Backup | `vault-core::backup` | ICS0022 |
-| User management | `vault-core::user` (single user in MVP) | both |
+| Session | `vault-core::session` (single user in MVP) | both |
 | CLI | `vault-cli` | ICS0022 |
 | Web server + client | `vault-web`, `web/` *(planned)* | ICS0027 |
 
