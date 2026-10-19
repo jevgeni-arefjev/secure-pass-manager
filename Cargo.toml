@@ -10,3 +10,7 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Argon2 is unusably slow unoptimised; keep it fast in debug builds and tests.
+[profile.dev.package.argon2]
+opt-level = 3

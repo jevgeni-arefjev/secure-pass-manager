@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** scaffolding only. Crypto algorithms are chosen and their dependencies added to `vault-core`, but the crates are still empty stubs; nothing is implemented yet.
+> **Status:** early MVP. The encryption module (`vault-core::crypto`) is implemented and tested; storage, session, audit, backup and the CLI are still stubs.
 
 ## Project layout
 
@@ -19,9 +19,11 @@ It is a password manager with one shared Rust core and two front ends:
 ├── docs/agents/            # notes for coding agents: issue tracker, triage labels, domain docs
 ├── docs/adr/               # architecture decision records
 ├── vault-core/             # shared library, no I/O front end
+│   ├── tests/crypto.rs     # encryption module behaviour, through its public API
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
+│       ├── crypto/         # header encoding, KDF params, locked + zeroized secret memory
 │       ├── storage.rs      # Storage: one SQLite file per user's vault (header + encrypted body), parameterized queries
 │       ├── audit.rs        # Audit log: structured events, never secrets
 │       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
@@ -71,9 +73,12 @@ Planned commands are listed in [`secure-password-manager.md` §5](secure-passwor
 
 ```bash
 cargo test                          # all workspace tests
+cargo test -- --ignored             # slow tests: the production KDF (256 MiB Argon2id)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+Tests create vaults in a cheap test format (feature `insecure-test-kdf`, ADR-0005), which only test builds enable. Run tests in debug: `cargo test --release` is refused on purpose, so the test format can never end up in a release binary.
 
 ### Web
 

@@ -83,7 +83,7 @@ Master-password, vault-at-rest and vault-in-memory analysis in `secure-password-
 | A05 Injection | Secret fields are escaped as text, never set with innerHTML; URL schemes allowlisted; CSP as backup |
 | A06 Insecure Design |	:) |
 | A07 Authentication Failures |	Generic unlock error with constant delay, whether or not the vaultname exists; tokens in memory only, rotated; server-side idle timeout. |
-| A08 Software or Data Integrity Failures |	Authenticated header blocks tampering, revision counter blocks rollback, atomic rename on save. |
+| A08 Software or Data Integrity Failures |	Authenticated header blocks tampering, atomic rename on save. Rollback to an older vault copy is not detected (accepted, see `secure-password-manager.md` threat model). |
 | A09 Security Logging and Alerting Failures | Audit log module in `secure-password-manager.md` |
 | A10 Mishandling of Exceptional Conditions	| Panic on any error; locks the vault with a generic 401 error |
 

@@ -45,7 +45,7 @@ sequenceDiagram
   SE->>ST: open the vault file for that vaultname
   ST-->>SE: header + ciphertext body
   SE->>ENC: header + master password
-  ENC->>ENC: check KDF params bounds, derive KEK, unwrap vault key
+  ENC->>ENC: check format version, derive KEK, unwrap vault key
   SE->>ENC: vault key + ciphertext body
   ENC-->>SE: plaintext body (held for the session)
   CLI->>SE: reveal one secret
@@ -62,7 +62,7 @@ sequenceDiagram
 
 It is also impossible to read other users' secrets: a session only ever opens the one vault it unlocked, and another user's file will not decrypt even if somehow obtained.
 
-Header contains format version, vaultname, KDF id and params, salt, wrap nonce, wrapped vault key, revision counter, body nonce. The vaultname is authenticated too, so it can only be changed through a dedicated rename (ADR-0003).
+Header contains format version, salt, wrap nonce, wrapped vault key, revision counter, body nonce. The format version also fixes the KDF and its params, so no cost parameter is stored (ADR-0005). The vaultname is not in the header: it is only the file name, so renaming the file renames the vault and a backup can be restored under any name (ADR-0004).
 
 Body is a JSON of all secrets *(may be changed later)*, padded to 4 KiB, rewritten whole on every save. Per-secret encryption leaks the number of secrets and their sizes and multiplies nonce management, wchih gains nothing in performance, since the app is so small.
 
@@ -72,7 +72,7 @@ Body is a JSON of all secrets *(may be changed later)*, padded to 4 KiB, rewritt
 
 Each vault has one random vault key, and one body key derived from it. Master password (or MFA/SSO) decrypts vault key. Vault key derives body key, which deciphers JSON block.
 
-1) Argon2id (m=256 MiB, t=3, p=1) derives a KEK from the master password it was chosen to prevent brute force attacks against encrypted vault. The KDF params are stored in the vault header and bounds-checked before deriving: floor 19 MiB, t=2, p=1 (OWASP minimum), ceiling 256 MiB, t=3, p=1. New vaults use the ceiling; raising params later means raising the ceiling, and existing vaults keep working;
+1) Argon2id (m=256 MiB, t=3, p=1) derives a KEK from the master password it was chosen to prevent brute force attacks against encrypted vault. The params are fixed by the format version in the header, not stored as separate values (ADR-0005). Raising them later means a new format version, and vaults in older versions keep working. Tests use a test twin of each format (top bit of the version set, OWASP minimum 19 MiB, t=2, p=1) that exists only in test builds;
 2) KEK wraps a random 32-byte vault key; the vault key derives a body key via HKDF-SHA-256. XChaCha20-Poly1305 is used for both the wrap and the body (one AEAD, 192-bit random nonces). The format is KDF-agnostic. Details of this scheme may likely be changed in the future.
 3) Changing the master password always rotates the vault key: a new random vault key (and with it a new body key, derived from it) re-encrypts the body, and a fresh salt derives a new KEK that wraps it. A copy of the vault taken before the change therefore never decrypts later versions, even with the old master password.
 
@@ -98,11 +98,12 @@ They might forget to lock the vault, accidentally copy or display all their secr
 
 | Surface | Threat | Mitigation |
 | --- | --- | --- |
-| Master password | Offline brute force against a stolen vault | New vaults use Argon2id with 256 MiB of memory per guess, and no vault below the OWASP floor (19 MiB, t=2) is accepted, so brute forcing is not an option; no password hash is stored that could be attacked instead |
+| Master password | Offline brute force against a stolen vault | Every vault uses Argon2id with 256 MiB of memory per guess, and release builds accept no other params (the cheaper test formats are compiled only into test builds), so brute forcing is not an option; no password hash is stored that could be attacked instead |
 | Master password | Old master password leaked together with an old copy of the vault | Accepted: it decrypts only that old snapshot; every master password change rotates the vault key, so later versions stay protected |
 | Master password | Weak password chosen by the user | Use strength meter, length rules, reject common passwords |
 | Vault at rest | File stolen from disk, backup or cloud sync | Whole body encrypted under a random vault key; only the header is readable |
-| Vault at rest | Header tampering | Header is authenticated as associated data so altered parameters fail the tag check; KDF params are bounds-checked before deriving, so a crafted header can't force a huge allocation |
+| Vault at rest | Header tampering | Header is authenticated as associated data so altered fields fail the tag check; no KDF params are read from the header (the format version fixes them), so a crafted header can't force a huge allocation |
+| Vault at rest | Two vaults with the same master password swapped on disk | Accepted: needs write access to the vault directory and reveals nothing; vaults with different passwords fail to unlock (ADR-0004) |
 | Vault at rest | Rollback: an older copy of the vault file put in place of the current one, bringing back a rotated password or dropping newer secrets | Accepted: detection needs trusted state the attacker can't roll back at the same time (hardware counter, remote server or a per-device state file), which is out of scope. An attacker with write access to the vault directory can usually replace the binary anyway. The authenticated revision counter only orders backups and writes; it is not rollback protection |
 | Vault at rest | Corruption or crash mid-write losing the vault | Write to a temp file, fsync, atomic rename; keep the previous version as a backup |
  |Vault at rest | Malicious crafted input reaching the parser or a query | #![forbid(unsafe_code)] and parameterized SQL; header parser fuzzed |

@@ -15,7 +15,7 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 - Each user's vault is a separate SQLite file named after its vaultname (`vault init` asks for it). MVP handles one user; unlock code lives in `vault-core::session` so multi-user extends it.
 - No master password hash is stored: unlock succeeds only if the vault key unwraps.
 - Core stays as modules in one crate, not separate crates.
-- Crypto: Argon2id (m=256 MiB, t=3, p=1) for the KEK, with KDF params stored in the vault header; XChaCha20-Poly1305 for both the vault-key wrap and the body; HKDF-SHA-256 for the body key. Do not change algorithms or params without asking.
+- Crypto: Argon2id (m=256 MiB, t=3, p=1) for the KEK, with KDF params fixed by the format version in the vault header (ADR-0005); XChaCha20-Poly1305 for both the vault-key wrap and the body; HKDF-SHA-256 for the body key. Do not change algorithms or params without asking.
 - CLI session is an interactive shell: `vault unlock` opens a `vault>` prompt and keys live only in that process, never on disk.
 - Secrets are entered only via hidden terminal prompts (e.g. `vault save <secret>` prompts for the password).
 - Web is a local demo only (no Vercel/serverless: design needs a long-lived process holding session keys).

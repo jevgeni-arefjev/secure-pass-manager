@@ -9,10 +9,22 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Cheap test formats (OWASP-minimum Argon2id, ADR-0005). Only this crate's own tests
+# enable it, via the dev-dependency below; release builds refuse to compile with it.
+insecure-test-kdf = []
+
 [dependencies]
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "0.4"
 hkdf = "0.13"
+region = { version = "4.0", default-features = false }
 sha2 = "0.11.0"
 zeroize = { version = "1.9", features = ["derive"] }
+
+[target."cfg(unix)".dependencies]
+rlimit = "0.11"
+
+[dev-dependencies]
+vault-core = { path = ".", features = ["insecure-test-kdf"] }
