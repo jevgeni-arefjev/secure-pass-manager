@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** early MVP. The encryption module (`vault-core::crypto`) is implemented and tested; storage, session, audit, backup and the CLI are still stubs.
+> **Status:** early MVP. The encryption (`vault-core::crypto`) and storage (`vault-core::storage`) modules are implemented and tested; session, audit, backup and the CLI are still stubs.
 
 ## Project layout
 
@@ -20,11 +20,13 @@ It is a password manager with one shared Rust core and two front ends:
 ├── docs/adr/               # architecture decision records
 ├── vault-core/             # shared library, no I/O front end
 │   ├── tests/crypto.rs     # encryption module behaviour, through its public API
+│   ├── tests/storage.rs    # storage module behaviour, through its public API
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
 │       ├── crypto/         # header encoding, KDF params, locked + zeroized secret memory
-│       ├── storage.rs      # Storage: one SQLite file per user's vault (header + encrypted body), parameterized queries
+│       ├── storage.rs      # Storage: one SQLite file per vault (header + encrypted body), hardened open, revision-checked saves (ADR-0006)
+│       ├── storage/        # vaultname validation
 │       ├── audit.rs        # Audit log: structured events, never secrets
 │       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
 │       └── session.rs      # Session: unlock/lock, holds decrypted secrets, reveals one at a time (single user in MVP)
@@ -58,6 +60,8 @@ Rust 1.85 or newer (edition 2024). On a clean machine, install it with [rustup](
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
+
+A C compiler is also needed: SQLite is compiled from source (`rusqlite`'s `bundled` feature), so no system SQLite library is required. On Fedora `sudo dnf install gcc`, on Debian/Ubuntu `sudo apt install build-essential`, on macOS `xcode-select --install`.
 
 ### CLI
 

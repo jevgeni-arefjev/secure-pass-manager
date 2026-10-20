@@ -14,6 +14,10 @@ _Avoid_: vault database, vault db, account
 The name of a vault, entered together with the master password to unlock it.
 _Avoid_: username, login, account name (those belong to a secret)
 
+**Vault directory**:
+The place on a device where all vaults live.
+_Avoid_: vault folder, data dir
+
 **Master password**:
 The password that unlocks a vault, and the only way to open it.
 _Avoid_: vault password

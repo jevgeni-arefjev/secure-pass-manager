@@ -20,7 +20,10 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 getrandom = "0.4"
 hkdf = "0.13"
 region = { version = "4.0", default-features = false }
+rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.11.0"
+tempfile = "3.27"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 zeroize = { version = "1.9", features = ["derive"] }
 
 [target."cfg(unix)".dependencies]
@@ -28,3 +31,4 @@ rlimit = "0.11"
 
 [dev-dependencies]
 vault-core = { path = ".", features = ["insecure-test-kdf"] }
+rusqlite = "0.40"
