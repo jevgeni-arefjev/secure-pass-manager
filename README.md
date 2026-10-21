@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** early MVP. The encryption (`vault-core::crypto`) and storage (`vault-core::storage`) modules are implemented and tested; session, audit, backup and the CLI are still stubs.
+> **Status:** early MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`) and session (`vault-core::session`) modules are implemented and tested; audit, backup and the CLI are still stubs.
 
 ## Project layout
 
@@ -21,6 +21,7 @@ It is a password manager with one shared Rust core and two front ends:
 ├── vault-core/             # shared library, no I/O front end
 │   ├── tests/crypto.rs     # encryption module behaviour, through its public API
 │   ├── tests/storage.rs    # storage module behaviour, through its public API
+│   ├── tests/session.rs    # session module behaviour, through its public API
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
@@ -29,7 +30,8 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── storage/        # vaultname validation
 │       ├── audit.rs        # Audit log: structured events, never secrets
 │       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
-│       └── session.rs      # Session: unlock/lock, holds decrypted secrets, reveals one at a time (single user in MVP)
+│       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once (single user in MVP)
+│       └── session/        # secret model + field validation, JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   └── src/main.rs
 │

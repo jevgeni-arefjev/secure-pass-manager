@@ -52,9 +52,9 @@ use sha2::Sha256;
 pub use header::Header;
 pub use secret_memory::{MasterPassword, Plaintext, VaultKey};
 
-use header::{Format, NONCE_LEN, TAG_LEN};
+use header::{Format, NONCE_LEN, SALT_LEN, TAG_LEN};
 use kdf::{KEY_LEN, derive_kek};
-use secret_memory::LockedBytes;
+pub(crate) use secret_memory::LockedBytes;
 
 /// HKDF info for the body key; the version tag lets a future format derive a different key.
 const BODY_KEY_INFO: &[u8] = b"secure-pass-manager/v1/body-key";
@@ -184,6 +184,23 @@ pub fn unlock(header: &Header, password: &MasterPassword) -> Result<VaultKey, Cr
     )
     .ok_or(CryptoError::UnlockFailed)?;
     Ok(VaultKey(key))
+}
+
+/// Spends what unlocking a current-format vault costs (one full Argon2id derivation
+/// under a random salt) without a vault, and discards the result.
+///
+/// Security: the session calls this when the vaultname has no vault file, so a missing
+/// vault takes as long to refuse as a wrong master password and vaultnames can't be
+/// probed by timing.
+///
+/// ```no_run
+/// # use vault_core::crypto::{self, MasterPassword};
+/// crypto::simulate_unlock(&MasterPassword::new("guess".into()))?;
+/// # Ok::<(), crypto::CryptoError>(())
+/// ```
+pub fn simulate_unlock(password: &MasterPassword) -> Result<(), CryptoError> {
+    let salt: [u8; SALT_LEN] = random_array()?;
+    derive_kek(password, Format::CURRENT.kdf_params(), &salt).map(drop)
 }
 
 /// Decrypts a vault body with an unlocked vault key, straight into locked memory.

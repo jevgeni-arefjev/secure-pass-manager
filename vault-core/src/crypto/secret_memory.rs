@@ -4,6 +4,7 @@
 //! None of these types implement `Clone` or `Debug`, so a secret can't be copied or
 //! printed by accident.
 
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroize;
 
 /// A fixed-length byte buffer kept in pages that belong to it alone.
@@ -101,7 +102,8 @@ impl Drop for LockedBytes {
 /// A master password, held in locked memory for as long as it is needed.
 ///
 /// Security: build it straight from the hidden terminal prompt; the source string is
-/// zeroized on construction. Never log or display it.
+/// zeroized on construction. Never log or display it. The password is NFC-normalized
+/// (ADR-0007), so the same characters typed on different systems derive the same KEK.
 ///
 /// ```
 /// use vault_core::crypto::MasterPassword;
@@ -110,7 +112,8 @@ impl Drop for LockedBytes {
 pub struct MasterPassword(LockedBytes);
 
 impl MasterPassword {
-    /// Moves `password` into locked memory and zeroizes the original string.
+    /// Moves `password` into locked memory, NFC-normalized (ADR-0007), and zeroizes the
+    /// original string.
     ///
     /// ```
     /// # use vault_core::crypto::MasterPassword;
@@ -118,7 +121,7 @@ impl MasterPassword {
     /// ```
     #[must_use]
     pub fn new(mut password: String) -> Self {
-        let locked = LockedBytes::from_slice(password.as_bytes());
+        let locked = nfc_into_locked(&password);
         password.zeroize();
         Self(locked)
     }
@@ -143,6 +146,25 @@ impl MasterPassword {
     pub fn is_memory_locked(&self) -> bool {
         self.0.is_locked()
     }
+}
+
+/// Copies `text` into a new locked buffer as NFC, without an intermediate unlocked
+/// string: one pass measures the normalized length, a second encodes into the buffer.
+///
+/// Security: the normalizer's small internal buffers aren't zeroized; they hold a few
+/// characters at a time and are accepted.
+///
+/// ```ignore
+/// let locked = nfc_into_locked("e\u{301}"); // stored as "\u{e9}"
+/// ```
+fn nfc_into_locked(text: &str) -> LockedBytes {
+    let len = text.nfc().map(char::len_utf8).sum();
+    let mut locked = LockedBytes::zeroed(len);
+    let mut at = 0;
+    for c in text.nfc() {
+        at += c.encode_utf8(&mut locked.as_mut_bytes()[at..]).len();
+    }
+    locked
 }
 
 /// The random 32-byte key a vault is encrypted under, available only while unlocked.

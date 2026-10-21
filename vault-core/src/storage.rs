@@ -193,7 +193,7 @@ pub trait VaultStore {
 /// let store = SqliteStore::new(dir.path().join("vaults"))?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SqliteStore {
     dir: PathBuf,
 }

@@ -35,6 +35,13 @@ _Avoid_: name, entry name
 **Field**:
 One named part of a secret, such as its title, username, password or URL.
 
+**Standard field**:
+One of the fields every secret may have: username, password, URL, notes, tags. The password is always a hidden field.
+
+**Custom field**:
+A field the person names themselves for a service that needs more than the standard fields, such as a recovery code; each one is marked hidden or not.
+_Avoid_: extra field, additional field
+
 **Hidden field**:
 A field holding a password, token, key or seed; it is always masked unless explicitly revealed.
 _Avoid_: secret field, secret value
