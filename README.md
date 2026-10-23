@@ -35,7 +35,13 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once (single user in MVP)
 │       └── session/        # secret model + field validation, JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
-│   └── src/main.rs
+│   ├── tests/render.rs     # terminal output (get view, list table, escaping), through its public API
+│   └── src/
+│       ├── main.rs         # hardens the process, then hands over to the library
+│       ├── lib.rs
+│       ├── terminal.rs     # Terminal trait (fakeable in tests) and the real stdin/stdout one; in-memory history only
+│       ├── terminal/       # masked prompt: one `*` per character, zeroizing buffer (ADR-0008)
+│       └── render.rs       # get view and list table; escapes control and bidi characters; hidden fields shown as `*`
 │
 │   # planned, not created yet
 ├── vault-web/              # HTTP server: TLS, sessions, CSRF, authz; serves the client bundle
