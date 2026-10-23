@@ -14,9 +14,15 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6.7", features = ["derive"] }
 crossterm = "0.29"
+dirs = "7.0.0"
 rustyline = { version = "19", default-features = false }
+shlex = "2.0.1"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 unicode-width = "0.2"
 vault-core = { path = "../vault-core" }
 zeroize = "1.9"
@@ -24,3 +30,6 @@ zeroize = "1.9"
 [dev-dependencies]
 tempfile = "3.27"
 vault-core = { path = "../vault-core", features = ["insecure-test-kdf"] }
+
+[target."cfg(unix)".dependencies]
+signal-hook = "0.4.5"

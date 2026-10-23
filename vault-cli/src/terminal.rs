@@ -3,17 +3,21 @@
 //!
 //! [`StdTerminal`] is the real one: `rustyline` for visible lines (command history kept
 //! in memory only, never written to a file) and our own masked prompt for hidden input
-//! (ADR-0008).
+//! (ADR-0008). It also owns the clipboard ([`crate::clipboard`]).
 
 mod masked;
 
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use rustyline::DefaultEditor;
 use rustyline::config::Config;
 use rustyline::error::ReadlineError;
+use rustyline::{DefaultEditor, ExternalPrinter};
+use vault_core::session::HiddenValue;
 use zeroize::Zeroizing;
+
+use crate::clipboard::Clipboard;
 
 /// Most commands kept in the in-memory history of one vault shell.
 const MAX_HISTORY: usize = 200;
@@ -36,6 +40,8 @@ pub enum TerminalError {
     MultilinePaste,
     /// Reading or writing the terminal failed.
     Io,
+    /// There is no clipboard to copy to (e.g. no display).
+    NoClipboard,
 }
 
 impl fmt::Display for TerminalError {
@@ -52,6 +58,7 @@ impl fmt::Display for TerminalError {
             Self::NotATerminal => "hidden input needs a terminal",
             Self::MultilinePaste => "pasted text held a line break; nothing was entered",
             Self::Io => "terminal input or output failed",
+            Self::NoClipboard => "the clipboard is not available",
         })
     }
 }
@@ -116,6 +123,29 @@ pub trait Terminal {
 
     /// Whether stdout is a terminal; hidden fields are only revealed when it is.
     fn stdout_is_terminal(&self) -> bool;
+
+    /// Copies `value` to the clipboard, to be cleared again after a while.
+    fn copy_to_clipboard(&mut self, value: &HiddenValue) -> Result<(), TerminalError>;
+
+    /// The parts of the terminal other threads (auto-lock, signals) may use.
+    fn handle(&mut self) -> Arc<dyn TerminalHandle>;
+}
+
+/// What a background thread may do to the terminal while the shell waits for input.
+///
+/// ```ignore
+/// let handle = terminal.handle();
+/// std::thread::spawn(move || {
+///     handle.clear_clipboard();
+///     handle.notify("vault locked (idle)");
+/// });
+/// ```
+pub trait TerminalHandle: Send + Sync {
+    /// Shows `message` above the prompt that is waiting for input.
+    fn notify(&self, message: &str);
+
+    /// Clears the clipboard if it still holds a value we copied.
+    fn clear_clipboard(&self);
 }
 
 /// The real terminal: stdin, stdout and stderr of this process.
@@ -128,6 +158,8 @@ pub trait Terminal {
 /// ```
 pub struct StdTerminal {
     editor: DefaultEditor,
+    clipboard: Clipboard,
+    handle: Option<Arc<StdHandle>>,
 }
 
 impl StdTerminal {
@@ -144,17 +176,55 @@ impl StdTerminal {
             .build();
         Ok(Self {
             editor: DefaultEditor::with_config(config)?,
+            clipboard: Clipboard::new(),
+            handle: None,
         })
     }
+}
 
-    /// The underlying line editor, for the vault shell to print messages above the
-    /// prompt from another thread (auto-lock).
+impl Drop for StdTerminal {
+    /// Clears our copy from the clipboard when the CLI exits.
+    ///
+    /// ```no_run
+    /// # let terminal = vault_cli::terminal::StdTerminal::new()?;
+    /// drop(terminal);
+    /// # Ok::<(), vault_cli::terminal::TerminalError>(())
+    /// ```
+    fn drop(&mut self) {
+        self.clipboard.clear_if_ours();
+    }
+}
+
+/// [`TerminalHandle`] for [`StdTerminal`]: prints through rustyline's external printer
+/// (so the message appears above a waiting prompt), or to stderr if there is none.
+struct StdHandle {
+    printer: Mutex<Option<Box<dyn ExternalPrinter + Send>>>,
+    clipboard: Clipboard,
+}
+
+impl TerminalHandle for StdHandle {
+    /// Prints `message` above the prompt, falling back to stderr.
     ///
     /// ```ignore
-    /// let printer = terminal.editor_mut().create_external_printer()?;
+    /// handle.notify("vault locked (idle)");
     /// ```
-    pub fn editor_mut(&mut self) -> &mut DefaultEditor {
-        &mut self.editor
+    fn notify(&self, message: &str) {
+        let mut printer = self.printer.lock().unwrap_or_else(PoisonError::into_inner);
+        let printed = printer
+            .as_mut()
+            .is_some_and(|p| p.print(format!("{message}\n")).is_ok());
+        if !printed {
+            let _ = writeln!(io::stderr(), "{message}");
+        }
+    }
+
+    /// Clears our copy from the clipboard.
+    ///
+    /// ```ignore
+    /// handle.clear_clipboard();
+    /// ```
+    fn clear_clipboard(&self) {
+        self.clipboard.clear_if_ours();
     }
 }
 
@@ -233,5 +303,42 @@ impl Terminal for StdTerminal {
     /// ```
     fn stdout_is_terminal(&self) -> bool {
         io::stdout().is_terminal()
+    }
+
+    /// Copies through the system clipboard, cleared after [`crate::clipboard::CLEAR_AFTER`].
+    ///
+    /// ```no_run
+    /// # use vault_cli::terminal::{StdTerminal, Terminal};
+    /// # use vault_core::session::HiddenValue;
+    /// # let mut terminal = StdTerminal::new()?;
+    /// terminal.copy_to_clipboard(&HiddenValue::new("s3cret!".into()))?;
+    /// # Ok::<(), vault_cli::terminal::TerminalError>(())
+    /// ```
+    fn copy_to_clipboard(&mut self, value: &HiddenValue) -> Result<(), TerminalError> {
+        self.clipboard
+            .copy(value)
+            .map_err(|_| TerminalError::NoClipboard)
+    }
+
+    /// One shared handle, created on first use.
+    ///
+    /// ```no_run
+    /// # use vault_cli::terminal::{StdTerminal, Terminal};
+    /// # let mut terminal = StdTerminal::new()?;
+    /// let handle = terminal.handle();
+    /// handle.notify("hello from another thread");
+    /// # Ok::<(), vault_cli::terminal::TerminalError>(())
+    /// ```
+    fn handle(&mut self) -> Arc<dyn TerminalHandle> {
+        if self.handle.is_none() {
+            let printer = self.editor.create_external_printer().ok();
+            self.handle = Some(Arc::new(StdHandle {
+                printer: Mutex::new(
+                    printer.map(|p| Box::new(p) as Box<dyn ExternalPrinter + Send>),
+                ),
+                clipboard: self.clipboard.clone(),
+            }));
+        }
+        self.handle.clone().expect("created above")
     }
 }
