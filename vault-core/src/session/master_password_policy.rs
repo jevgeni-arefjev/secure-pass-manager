@@ -1,5 +1,9 @@
 //! The minimum strength a new master password must have, checked when a vault is
 //! created and when its master password is changed.
+//!
+//! No strength estimator (e.g. zxcvbn) is used: they copy the password into ordinary heap
+//! strings (lowercased forms, match tokens) that are freed without zeroizing, which would
+//! break the rule that no implicit copies of a secret are made.
 
 use std::fmt;
 

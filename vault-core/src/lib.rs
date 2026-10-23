@@ -12,5 +12,6 @@ compile_error!(
 pub mod audit;
 pub mod backup;
 pub mod crypto;
+pub mod generator;
 pub mod session;
 pub mod storage;

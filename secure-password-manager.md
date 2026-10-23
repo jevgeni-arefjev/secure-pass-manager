@@ -100,7 +100,7 @@ They might forget to lock the vault, accidentally copy or display all their secr
 | --- | --- | --- |
 | Master password | Offline brute force against a stolen vault | Every vault uses Argon2id with 256 MiB of memory per guess, and release builds accept no other params (the cheaper test formats are compiled only into test builds), so brute forcing is not an option; no password hash is stored that could be attacked instead |
 | Master password | Old master password leaked together with an old copy of the vault | Accepted: it decrypts only that old snapshot; every master password change rotates the vault key, so later versions stay protected |
-| Master password | Weak password chosen by the user | Use strength meter, length rules, reject common passwords |
+| Master password | Weak password chosen by the user | Length rule (at least 12 characters), a single repeated character and a built-in list of common passwords are refused. No strength meter: estimators such as zxcvbn copy the password into heap strings that are freed without zeroizing, breaking the no-implicit-copies rule below |
 | Vault at rest | File stolen from disk, backup or cloud sync | Whole body encrypted under a random vault key; only the header is readable |
 | Vault at rest | Header tampering | Header is authenticated as associated data so altered fields fail the tag check; no KDF params are read from the header (the format version fixes them), so a crafted header can't force a huge allocation |
 | Vault at rest | Two vaults with the same master password swapped on disk | Accepted: needs write access to the vault directory and reveals nothing; vaults with different passwords fail to unlock (ADR-0004) |

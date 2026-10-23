@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** early MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`) and session (`vault-core::session`) modules are implemented and tested; audit, backup and the CLI are still stubs.
+> **Status:** early MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`) session (`vault-core::session`) and password generator (`vault-core::generator`) modules are implemented and tested; audit, backup and the CLI are still stubs.
 
 ## Project layout
 
@@ -22,10 +22,12 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── tests/crypto.rs     # encryption module behaviour, through its public API
 │   ├── tests/storage.rs    # storage module behaviour, through its public API
 │   ├── tests/session.rs    # session module behaviour, through its public API
+│   ├── tests/generator.rs  # password generator behaviour, through its public API
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
 │       ├── crypto/         # header encoding, KDF params, locked + zeroized secret memory
+│       ├── generator.rs    # Password generator: uniform visible-ASCII passwords from the OS CSPRNG
 │       ├── storage.rs      # Storage: one SQLite file per vault (header + encrypted body), hardened open, revision-checked saves (ADR-0006)
 │       ├── storage/        # vaultname validation
 │       ├── audit.rs        # Audit log: structured events, never secrets
@@ -49,6 +51,7 @@ How the modules map to the specs:
 | Audit log | `vault-core::audit` | ICS0022 (reused by ICS0027) |
 | Backup | `vault-core::backup` | ICS0022 |
 | Session | `vault-core::session` (single user in MVP) | both |
+| Password generator | `vault-core::generator` | both |
 | CLI | `vault-cli` | ICS0022 |
 | Web server + client | `vault-web`, `web/` *(planned)* | ICS0027 |
 

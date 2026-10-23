@@ -1,6 +1,6 @@
 [package]
 name = "vault-core"
-description = "Shared core: encryption, storage, audit log, backup"
+description = "Shared core: encryption, storage, session, password generator, audit log, backup"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
