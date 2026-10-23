@@ -46,6 +46,10 @@ _Avoid_: extra field, additional field
 A field holding a password, token, key or seed; it is always masked unless explicitly revealed.
 _Avoid_: secret field, secret value
 
+**Reveal**:
+Showing or copying the hidden fields of one secret, only on an explicit request.
+_Avoid_: unmask, decrypt
+
 **Username**:
 The field of a secret that names the account at that service; a service may call it a login or an email instead.
 _Avoid_: using it for the vaultname
@@ -66,3 +70,7 @@ The period between unlock and lock, while a vault is open.
 **Auto-lock**:
 Locking a vault automatically after an idle timeout.
 _Avoid_: auto-logout
+
+**Vault shell**:
+The interactive `vault>` prompt a CLI session runs in; leaving it locks the vault.
+_Avoid_: shell (on its own, that is the user's OS shell), REPL, console
