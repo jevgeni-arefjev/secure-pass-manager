@@ -114,28 +114,52 @@ They might forget to lock the vault, accidentally copy or display all their secr
 | Vault at rest | Vault file names reveal vaultnames to other local users | Accepted: keeps a vault recoverable when its name is forgotten; the contents stay encrypted |
 | Vault in memory | Memory dump or core file of a running process | Vault key in locked pages, zeroed on lock; core dumps disabled |
 | Vault in memory | Key paged to swap or a hibernation file | `mlock` the key material and the decrypted secrets, no swap allocations; if the decrypted body exceeds `RLIMIT_MEMLOCK` it falls back to zeroize-only, with a warning logged |
-| Vault in memory | Session left unattended | Auto-lock on idle timeout, on screen lock, on suspend |
+| Vault in memory | Session left unattended | Auto-lock on idle timeout (default 5 minutes, 1-60 per unlock): a watcher thread wipes the keys the moment it passes, even while the shell waits for input, and clears the clipboard; the process exits on the next input. Locking on screen lock or suspend is planned, not implemented |
+| Vault in memory | Process ended by a signal while unlocked | SIGTERM, SIGHUP (terminal closed), SIGINT and SIGQUIT wipe the session and clear the clipboard before exiting. Accepted: SIGKILL can't be caught, so the OS frees the memory without wiping it (core dumps stay disabled) |
 | Vault in memory | Runtime copies of secrets | In Rust, `zeroize`/`secrecy`; no implicit copies of secret types, `#[must_use]` on every AEAD output (so tag failure is not ignored) |
 | Access control | One user reading or editing another's secrets | Each user's vault is a separate file; a session only opens the vault it unlocked, and another vault doesn't decrypt without its master password |
 | Interface | Secrets in shell history / process arguments | Never accept a master password or hidden field as an argument or env variable; prompt on the terminal with echo disabled |
-| Interface | Secrets in terminal scrollback | Hidden fields are masked by default and only unmasked with `--show`, for one secret at a time, so this threat exists, but is minimized |
-| Interface | Secrets in redirected output or a piped log | Refuse to write hidden fields when stdout is not a TTY (maybe unless an explicit `--raw` flag is passed) |
-| Interface | Modified header content received by the terminal | Validate, strip or escape control sequences before printing any stored field or evaluating; |
+| Interface | Secrets in terminal scrollback | Hidden fields are masked by default (as a single `*`, whatever their length) and only unmasked with `--show`, for one secret at a time, so this threat exists, but is minimized |
+| Interface | Onlooker or screen recording sees how long a typed master password or hidden field is (prompts echo one `*` per character) | Accepted: the person sees their input arrive; weak master passwords are refused anyway, and the length barely narrows the search (ADR-0008) |
+| Interface | Copied password left on the clipboard or kept by a clipboard manager | `--copy` copies the password only, marked as excluded from clipboard history; it is cleared after 20 seconds, on lock, on exit and on a termination signal, if the clipboard still holds it. Accepted: a clipboard manager that ignores the hint, or another program reading the clipboard within those 20 seconds |
+| Interface | Command history of the vault shell | Kept in memory only and never written to a file; command lines hold titles and flags, never hidden fields |
+| Interface | Secrets in redirected output or a piped log | `get --show` is refused when stdout is not a terminal, with no override. Hidden prompts refuse when stdin is not a terminal, so a master password can't be piped in either. `gen` prints its new password either way, as it isn't stored |
+| Interface | Crafted stored text driving the terminal (escape sequences) or disguising itself (bidi overrides, zero-width characters) | The core refuses control and invisible formatting characters on save; the CLI also escapes every stored text it prints (`\x1b`, `\u{202e}`), titles and field names included, in case a vault was written by another build |
 | Interface | Timing or error msg attacks | One generic unlock failure message and a constant minimum delay, whether or not the vaultname exists |
 
-## 5. Planned commands
+## 5. Commands
 
 Since the app currently doesn't have a name, example name is `vault`.
 
-```
-vault init | unlock | lock        # create a vault (asks for a vaultname); start / end session (`unlock` opens an interactive `vault>` shell)
-vault get <secret> [--show|--copy] # print a secret by its title, hidden fields masked; `--show` unmasks them; `--copy` copies the password to the clipboard
-vault save <secret>               # Save new secret (hidden fields via hidden prompt), or replace the old one
-vault list                        # Show all secrets, non-hidden fields only
-vault rm <secret>                 # remove a secret
-vault gen [--length 24]           # generate a text password
-vault export-cypher <path>        # ciphertext copy of your vault file
-```
-as well as others, e.g. to view logs.
+At the OS shell:
 
-The session is an interactive shell: `vault unlock` prompts for the vaultname and master password and opens a `vault>` prompt where the commands above run. Vault keys live only in that process and are never written to disk; `lock`, exit or idle timeout wipes them. Hidden fields are never accepted as arguments, only through hidden prompts.
+```
+vault init [vaultname] [--idle-timeout 5]    # create a vault (asks for the vaultname if left out) and open the vault shell on it
+vault unlock [vaultname] [--idle-timeout 5]  # unlock a vault and open the vault shell (`vault>`) on it
+vault gen [--length 24]                      # print a random password (12-128 characters)
+vault --vault-dir <path> ...                 # use another vault directory (default: the platform data directory)
+```
+
+Inside the vault shell (`vault>`):
+
+```
+get <title> [--show|--copy]   # print a secret, hidden fields masked; `--show` unmasks them; `--copy` copies the password to the clipboard instead
+save <title>                  # add a secret, asking for each field (hidden fields via hidden prompt), or replace the one with this title after confirming
+list                          # all secrets: title, username, URL, tags; never hidden fields
+rm <title>                    # remove a secret after confirming
+gen [--length 24]             # print a random password and offer to copy it
+passwd                        # change the master password
+lock | exit | quit            # lock the vault and leave the shell (also Ctrl-D)
+help                          # list the commands
+```
+
+Planned: `export-cypher <path>` (ciphertext copy of your vault file, with the backup module) and commands to view the audit log.
+
+The session is an interactive shell: `vault unlock` prompts for the vaultname and master password and opens a `vault>` prompt where the commands above run. Vault keys live only in that process and are never written to disk; `lock`, Ctrl-D, the idle timeout or a termination signal wipes them, and the process ends with them. Hidden fields are never accepted as arguments, only through hidden prompts.
+
+- **Prompts.** Hidden prompts echo one `*` per character (ADR-0008) and need a terminal on stdin. A paste containing a line break is refused whole. Ctrl-C cancels the current command; at the `vault>` prompt it just clears the line.
+- **Unlock and init.** Three tries for the master password; every failed unlock shows the same message. `init` asks for the new master password twice, and refuses a taken vaultname before asking.
+- **Saving.** `save` asks for username, password, URL, notes, tags, then custom fields one by one, each marked hidden or not. An empty password is generated (24 characters). Titles with spaces are quoted: `get "my bank"`.
+- **Auto-lock.** After the idle timeout (default 5 minutes, `--idle-timeout` 1-60) the keys are wiped at once and the clipboard is cleared; the shell then exits on the next input. A prompt left waiting doesn't keep the vault open.
+- **Clipboard.** `--copy` clears the clipboard after 20 seconds, on lock and on exit, if it still holds the copied value.
+
