@@ -7,13 +7,15 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::DateTime;
 use tempfile::TempDir;
+use vault_core::audit::{AuditError, AuditSink, Event, Line, MemorySink, Record};
 use vault_core::crypto::MasterPassword;
 use vault_core::session::{
-    Clock, CustomField, FieldValue, HiddenValue, InvalidSecret, Saved, Secret, Session,
-    SessionConfig, SessionError, WeakMasterPassword,
+    Clock, CustomField, DEFAULT_IDLE_TIMEOUT, FieldValue, HiddenValue, InvalidSecret, Saved,
+    Secret, Session, SessionConfig, SessionError, WeakMasterPassword,
 };
-use vault_core::storage::SqliteStore;
+use vault_core::storage::{SqliteStore, Vaultname};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -87,10 +89,11 @@ impl Clock for ManualClock {
     }
 }
 
-/// A fresh vault directory and a manual clock for one test.
+/// A fresh vault directory, a manual clock and an in-memory audit log for one test.
 struct Fixture {
     dir: TempDir,
     clock: Arc<ManualClock>,
+    audit: Arc<MemorySink>,
 }
 
 impl Fixture {
@@ -103,6 +106,7 @@ impl Fixture {
         Self {
             dir: TempDir::new().unwrap(),
             clock: ManualClock::new(),
+            audit: Arc::new(MemorySink::default()),
         }
     }
 
@@ -115,7 +119,7 @@ impl Fixture {
         SqliteStore::new(self.dir.path().join("vaults")).unwrap()
     }
 
-    /// A config on this fixture's clock, with the default idle timeout.
+    /// A config on this fixture's clock and audit log, with the default idle timeout.
     ///
     /// ```text
     /// Session::unlock(fx.store(), "alice", &pw, fx.config())
@@ -123,8 +127,38 @@ impl Fixture {
     fn config(&self) -> SessionConfig {
         SessionConfig {
             clock: self.clock.clone(),
-            ..SessionConfig::default()
+            ..SessionConfig::new(self.audit.clone())
         }
+    }
+
+    /// The audit events recorded for `vaultname`, oldest first.
+    ///
+    /// ```text
+    /// assert_eq!(fx.events("alice"), [Event::VaultCreated]);
+    /// ```
+    fn events(&self, vaultname: &str) -> Vec<Event> {
+        self.records(vaultname)
+            .into_iter()
+            .map(|r| r.event)
+            .collect()
+    }
+
+    /// The audit records for `vaultname`, oldest first.
+    ///
+    /// ```text
+    /// let records = fx.records("alice");
+    /// ```
+    fn records(&self, vaultname: &str) -> Vec<Record> {
+        let name = Vaultname::parse(vaultname).unwrap();
+        let mut lines = self.audit.read_recent(&name, usize::MAX).unwrap();
+        lines.reverse();
+        lines
+            .into_iter()
+            .map(|line| match line {
+                Line::Record(record) => record,
+                Line::Unreadable => panic!("memory sink gave an unreadable line"),
+            })
+            .collect()
     }
 
     /// Creates vault `alice` under [`PASSWORD`] and returns its unlocked session.
@@ -660,4 +694,292 @@ fn sessions_can_move_between_threads() {
     /// ```
     fn assert_send<T: Send>() {}
     assert_send::<Session<SqliteStore>>();
+}
+
+// ---- Audit events (ADR-0010) ----
+
+/// `Event::SecretAdded` for the secret `title`.
+///
+/// ```text
+/// assert_eq!(fx.events("alice")[1], added("GitHub"));
+/// ```
+fn added(title: &str) -> Event {
+    Event::SecretAdded {
+        title: title.to_owned(),
+    }
+}
+
+/// `Event::SecretReplaced` for the secret `title`.
+///
+/// ```text
+/// assert_eq!(fx.events("alice")[2], replaced("github"));
+/// ```
+fn replaced(title: &str) -> Event {
+    Event::SecretReplaced {
+        title: title.to_owned(),
+    }
+}
+
+/// `Event::SecretRemoved` for the secret `title`.
+///
+/// ```text
+/// assert_eq!(fx.events("alice")[3], removed("github"));
+/// ```
+fn removed(title: &str) -> Event {
+    Event::SecretRemoved {
+        title: title.to_owned(),
+    }
+}
+
+/// `Event::SecretRevealed` for the secret `title`.
+///
+/// ```text
+/// assert_eq!(fx.events("alice").last(), Some(&revealed("GitHub")));
+/// ```
+fn revealed(title: &str) -> Event {
+    Event::SecretRevealed {
+        title: title.to_owned(),
+    }
+}
+
+/// A sink whose every write and read fails, like a full disk.
+struct FailingSink;
+
+impl AuditSink for FailingSink {
+    /// Always fails.
+    ///
+    /// ```text
+    /// assert!(FailingSink.append(&alice, &record).is_err());
+    /// ```
+    fn append(&self, _: &Vaultname, _: &Record) -> Result<(), AuditError> {
+        Err(AuditError)
+    }
+
+    /// Always fails.
+    ///
+    /// ```text
+    /// assert!(FailingSink.read_recent(&alice, 20).is_err());
+    /// ```
+    fn read_recent(&self, _: &Vaultname, _: usize) -> Result<Vec<Line>, AuditError> {
+        Err(AuditError)
+    }
+}
+
+#[test]
+fn create_unlock_and_lock_are_recorded_with_the_clock_time_in_utc() {
+    let fx = Fixture::new();
+    fx.create().lock();
+    fx.clock.advance(Duration::from_secs(60));
+    fx.unlock("alice", PASSWORD).unwrap().lock();
+
+    let records = fx.records("alice");
+    let events: Vec<_> = records.iter().map(|r| r.event.clone()).collect();
+    assert_eq!(
+        events,
+        [
+            Event::VaultCreated,
+            Event::Locked,
+            Event::Unlocked,
+            Event::Locked
+        ]
+    );
+    assert_eq!(
+        records[0].time,
+        DateTime::from_timestamp(1_767_225_600, 0).unwrap()
+    );
+    assert_eq!(
+        records[2].time,
+        DateTime::from_timestamp(1_767_225_660, 0).unwrap()
+    );
+}
+
+#[test]
+fn failed_unlock_is_recorded_before_the_minimum_delay_runs_out() {
+    let fx = Fixture::new();
+    fx.create().lock();
+    let started = fx.clock.unix_time();
+
+    assert_eq!(
+        fx.unlock("alice", "wrong guess").err(),
+        Some(SessionError::UnlockFailed)
+    );
+
+    let failure = fx.records("alice").pop().unwrap();
+    assert_eq!(failure.event, Event::UnlockFailed);
+    assert_eq!(failure.time.timestamp(), i64::try_from(started).unwrap());
+    assert!(fx.clock.slept() >= Duration::from_secs(1));
+}
+
+#[test]
+fn failed_unlock_of_an_unknown_vaultname_records_nothing() {
+    let fx = Fixture::new();
+    assert!(fx.unlock("bob", PASSWORD).is_err());
+    assert_eq!(fx.events("bob"), []);
+    assert!(!fx.dir.path().join("vaults/bob").exists());
+}
+
+#[test]
+fn saved_and_removed_secrets_are_recorded_with_their_title() {
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    session.save(Secret::new("GitHub")).unwrap();
+    session.save(Secret::new("github")).unwrap();
+    session.remove("GITHUB").unwrap();
+
+    assert_eq!(
+        fx.events("alice")[1..],
+        [added("GitHub"), replaced("github"), removed("github"),]
+    );
+}
+
+#[test]
+fn listing_masked_get_and_failed_changes_record_nothing() {
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    session.save(full_secret()).unwrap();
+    let before = fx.events("alice");
+
+    session.list().unwrap();
+    session.get("github").unwrap();
+    session.contains("github").unwrap();
+    assert!(session.remove("nothing").is_err());
+    assert!(session.save(Secret::new("")).is_err());
+
+    assert_eq!(fx.events("alice"), before);
+}
+
+#[test]
+fn reveal_is_recorded_only_when_the_front_end_succeeds() {
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    session.save(full_secret()).unwrap();
+
+    let password = session
+        .reveal("github", |secret| {
+            Ok::<_, SessionError>(secret.password().unwrap().reveal().to_owned())
+        })
+        .unwrap();
+    assert_eq!(password, "p4ss-w0rd");
+    let failed: Result<(), SessionError> = session.reveal("github", |_| Err(SessionError::Storage));
+    assert_eq!(failed, Err(SessionError::Storage));
+    let missing: Result<(), SessionError> = session.reveal("nothing", |_| Ok(()));
+    assert_eq!(missing, Err(SessionError::SecretNotFound));
+
+    assert_eq!(fx.events("alice").last(), Some(&revealed("GitHub")));
+    assert_eq!(
+        fx.events("alice")
+            .iter()
+            .filter(|e| matches!(e, Event::SecretRevealed { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn auto_lock_conflict_and_signal_locks_are_recorded() {
+    let fx = Fixture::new();
+    let mut idle = fx.create();
+    fx.clock.advance(DEFAULT_IDLE_TIMEOUT);
+    assert!(!idle.is_unlocked());
+    idle.lock();
+
+    let mut first = fx.unlock("alice", PASSWORD).unwrap();
+    let mut second = fx.unlock("alice", PASSWORD).unwrap();
+    first.save(Secret::new("GitHub")).unwrap();
+    assert!(second.save(Secret::new("gitlab")).is_err());
+    first.lock_on_signal();
+
+    assert_eq!(
+        fx.events("alice"),
+        [
+            Event::VaultCreated,
+            Event::AutoLocked,
+            Event::Unlocked,
+            Event::Unlocked,
+            added("GitHub"),
+            Event::LockedOnConflict,
+            Event::TerminatedBySignal,
+        ]
+    );
+}
+
+#[test]
+fn master_password_changes_are_recorded_whether_they_succeed_or_not() {
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    let new = MasterPassword::new("tr0ub4dor & 3 staples".into());
+    let wrong = MasterPassword::new("wrong guess".into());
+
+    assert!(session.change_master_password(&wrong, &new).is_err());
+    session
+        .change_master_password(&MasterPassword::new(PASSWORD.into()), &new)
+        .unwrap();
+
+    assert_eq!(
+        fx.events("alice")[1..],
+        [
+            Event::MasterPasswordChangeFailed,
+            Event::MasterPasswordChanged
+        ]
+    );
+}
+
+#[test]
+fn a_failing_audit_log_never_blocks_the_operation() {
+    let fx = Fixture::new();
+    let config = || SessionConfig {
+        clock: fx.clock.clone(),
+        ..SessionConfig::new(Arc::new(FailingSink))
+    };
+    let password = MasterPassword::new(PASSWORD.into());
+    let mut session =
+        Session::create_insecure_for_tests(fx.store(), "alice", &password, config()).unwrap();
+    session.save(full_secret()).unwrap();
+    session
+        .reveal("github", |_| Ok::<_, SessionError>(()))
+        .unwrap();
+    session.remove("github").unwrap();
+    session.lock();
+
+    assert!(Session::unlock(fx.store(), "alice", &password, config()).is_ok());
+}
+
+#[test]
+fn audit_log_gives_this_vaults_events_newest_first() {
+    let fx = Fixture::new();
+    fx.try_create("bob", PASSWORD).unwrap().lock();
+    let mut session = fx.create();
+    session.save(Secret::new("GitHub")).unwrap();
+
+    let lines = session.audit_log(20).unwrap();
+    let events: Vec<_> = lines
+        .into_iter()
+        .map(|line| match line {
+            Line::Record(record) => record.event,
+            Line::Unreadable => panic!("unexpected unreadable line"),
+        })
+        .collect();
+    assert_eq!(events, [added("GitHub"), Event::VaultCreated]);
+    assert_eq!(session.audit_log(1).unwrap().len(), 1);
+}
+
+#[test]
+fn audit_log_is_refused_once_locked() {
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    fx.clock.advance(DEFAULT_IDLE_TIMEOUT);
+    assert_eq!(session.audit_log(20).err(), Some(SessionError::Locked));
+}
+
+#[test]
+fn audit_log_that_cannot_be_read_is_an_error() {
+    let fx = Fixture::new();
+    let config = SessionConfig {
+        clock: fx.clock.clone(),
+        ..SessionConfig::new(Arc::new(FailingSink))
+    };
+    let password = MasterPassword::new(PASSWORD.into());
+    let mut session =
+        Session::create_insecure_for_tests(fx.store(), "alice", &password, config).unwrap();
+    assert_eq!(session.audit_log(20).err(), Some(SessionError::AuditLog));
 }

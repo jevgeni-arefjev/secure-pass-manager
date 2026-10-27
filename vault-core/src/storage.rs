@@ -228,13 +228,13 @@ impl SqliteStore {
         Ok(Self { dir })
     }
 
-    /// The path of `name`'s vault home. The only place a path is built from a vaultname.
+    /// The path of `name`'s vault home.
     ///
     /// ```ignore
     /// assert!(store.home(&alice).ends_with("alice"));
     /// ```
     fn home(&self, name: &Vaultname) -> PathBuf {
-        self.dir.join(name.as_str())
+        vault_home(&self.dir, name)
     }
 
     /// The path of `name`'s vault file, inside its vault home.
@@ -246,30 +246,13 @@ impl SqliteStore {
         self.home(name).join(VAULT_FILE)
     }
 
-    /// Checks that `name`'s vault home is a real directory, not a symlink or a file;
-    /// [`StorageError::NotFound`] if it doesn't exist.
-    ///
-    /// Security: a symlinked vault home could point one vaultname at another vault or
-    /// outside the vault directory, so it is refused as [`StorageError::NotAVault`].
-    /// Group- or world-writable permissions are logged as a warning, not refused.
+    /// Checks `name`'s vault home; see [`existing_vault_home`].
     ///
     /// ```ignore
     /// self.check_home(&alice)?;
     /// ```
     fn check_home(&self, name: &Vaultname) -> Result<(), StorageError> {
-        let metadata = match fs::symlink_metadata(self.home(name)) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Err(StorageError::NotFound);
-            }
-            result => result.map_err(io_error)?,
-        };
-        if !metadata.is_dir() {
-            return Err(StorageError::NotAVault);
-        }
-        if is_loosely_permitted(&metadata) {
-            tracing::warn!(event = "vault_home_permissions_loose", vaultname = %name);
-        }
-        Ok(())
+        existing_vault_home(&self.dir, name).map(drop)
     }
 
     /// Opens `name`'s existing vault file as a hardened connection, after checking its
@@ -428,6 +411,44 @@ impl VaultStore for SqliteStore {
     }
 }
 
+/// The path of `name`'s vault home in the vault directory `dir`. The only place a path
+/// is built from a vaultname.
+///
+/// ```ignore
+/// assert!(vault_home(&dir, &alice).ends_with("alice"));
+/// ```
+fn vault_home(dir: &Path, name: &Vaultname) -> PathBuf {
+    dir.join(name.as_str())
+}
+
+/// The path of `name`'s vault home in the vault directory `dir`, after checking it is a
+/// real directory, not a symlink or a file; [`StorageError::NotFound`] if it doesn't
+/// exist. Never creates it. Also used by the audit log (ADR-0010).
+///
+/// Security: a symlinked vault home could point one vaultname at another vault or
+/// outside the vault directory, so it is refused as [`StorageError::NotAVault`].
+/// Group- or world-writable permissions are logged as a warning, not refused.
+///
+/// ```ignore
+/// let home = storage::existing_vault_home(&dir, &alice)?;
+/// ```
+pub(crate) fn existing_vault_home(dir: &Path, name: &Vaultname) -> Result<PathBuf, StorageError> {
+    let home = vault_home(dir, name);
+    let metadata = match fs::symlink_metadata(&home) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(StorageError::NotFound);
+        }
+        result => result.map_err(io_error)?,
+    };
+    if !metadata.is_dir() {
+        return Err(StorageError::NotAVault);
+    }
+    if is_loosely_permitted(&metadata) {
+        tracing::warn!(event = "vault_home_permissions_loose", vaultname = %name);
+    }
+    Ok(home)
+}
+
 /// Opens `path` as an existing SQLite file (never creating it, never following a
 /// symlink) with the defences for untrusted files on before the first read: defensive
 /// mode, untrusted schema, no URI parsing.
@@ -578,7 +599,7 @@ fn create_vault_home(home: &Path) -> io::Result<()> {
 /// ```ignore
 /// if is_loosely_permitted(&metadata) { tracing::warn!(...) }
 /// ```
-fn is_loosely_permitted(metadata: &Metadata) -> bool {
+pub(crate) fn is_loosely_permitted(metadata: &Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

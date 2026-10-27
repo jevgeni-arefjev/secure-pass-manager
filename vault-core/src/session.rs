@@ -14,25 +14,32 @@
 //! - Every change is sealed and saved at once; nothing unsaved lives only in memory.
 //! - Hidden values are page-locked; if any key, body or hidden value can't be locked, one
 //!   `memory_lock_unavailable` warning is logged per session.
-//! - Audit events go to `tracing` with the vaultname only, never a title or field.
+//! - Audit events go to the configured [`AuditSink`] only after their action succeeded,
+//!   and name at most a secret's title (ADR-0010). A failed write never blocks the
+//!   action; it gives one `audit_write_failed` warning per session. A failed unlock is
+//!   recorded within the minimum failure delay, and only for a vault that exists.
 //!
 //! ```
+//! use std::sync::Arc;
+//! use vault_core::audit::FileSink;
 //! use vault_core::crypto::MasterPassword;
-//! use vault_core::session::{HiddenValue, Secret, Session, SessionConfig};
+//! use vault_core::session::{HiddenValue, SessionError, Secret, Session, SessionConfig};
 //! use vault_core::storage::SqliteStore;
 //!
 //! let dir = tempfile::tempdir()?;
+//! let config = || SessionConfig::new(Arc::new(FileSink::new(dir.path())));
 //! let password = MasterPassword::new("correct horse battery".into());
-//! let mut session = Session::create_insecure_for_tests(
-//!     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default(),
-//! )?;
+//! let mut session =
+//!     Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, config())?;
 //! session.save(Secret::new("GitHub").with_password(HiddenValue::new("s3cret!".into())))?;
 //! session.lock();
 //!
-//! let mut session =
-//!     Session::unlock(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
-//! let github = session.get("github")?;
-//! assert_eq!(github.password().map(HiddenValue::reveal), Some("s3cret!"));
+//! let mut session = Session::unlock(SqliteStore::new(dir.path())?, "alice", &password, config())?;
+//! let shown = session.reveal("github", |github| {
+//!     Ok::<_, SessionError>(github.password().map(|p| p.reveal().to_owned()))
+//! })?;
+//! assert_eq!(shown.as_deref(), Some("s3cret!"));
+//! assert_eq!(session.audit_log(20)?.len(), 5); // created, saved, locked, unlocked, revealed
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -45,6 +52,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::DateTime;
+
+use crate::audit::{AuditSink, Event, Line, Record};
 use crate::crypto::{self, CryptoError, Header, MasterPassword, Plaintext, SealedVault, VaultKey};
 use crate::storage::{StorageError, VaultStore, Vaultname};
 
@@ -58,15 +68,17 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Shortest time any failed unlock takes, so failures can't be told apart by timing.
 const MIN_UNLOCK_FAILURE: Duration = Duration::from_secs(1);
 
-/// How a session behaves; front ends start from [`SessionConfig::default`].
+/// How a session behaves; front ends start from [`SessionConfig::new`].
 ///
 /// ```
+/// use std::sync::Arc;
 /// use std::time::Duration;
+/// use vault_core::audit::FileSink;
 /// use vault_core::session::SessionConfig;
 ///
 /// let config = SessionConfig {
 ///     idle_timeout: Duration::from_secs(60),
-///     ..SessionConfig::default()
+///     ..SessionConfig::new(Arc::new(FileSink::new("/home/alice/.local/share/secure-pass-manager/vaults")))
 /// };
 /// ```
 pub struct SessionConfig {
@@ -74,19 +86,27 @@ pub struct SessionConfig {
     pub idle_timeout: Duration,
     /// Where time comes from; [`SystemClock`] outside tests.
     pub clock: Arc<dyn Clock>,
+    /// Where audit events go (ADR-0010).
+    pub audit: Arc<dyn AuditSink>,
 }
 
-impl Default for SessionConfig {
-    /// A 5-minute idle timeout on the system clock.
+impl SessionConfig {
+    /// A 5-minute idle timeout on the system clock, recording audit events to `audit`.
+    /// There is no default sink, so no session runs without an audit log by accident.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::session::{SessionConfig, DEFAULT_IDLE_TIMEOUT};
-    /// assert_eq!(SessionConfig::default().idle_timeout, DEFAULT_IDLE_TIMEOUT);
+    /// let config = SessionConfig::new(Arc::new(MemorySink::default()));
+    /// assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
     /// ```
-    fn default() -> Self {
+    #[must_use]
+    pub fn new(audit: Arc<dyn AuditSink>) -> Self {
         Self {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             clock: Arc::new(SystemClock),
+            audit,
         }
     }
 }
@@ -124,6 +144,8 @@ pub enum SessionError {
     Storage,
     /// The OS random number generator failed.
     Randomness,
+    /// The audit log couldn't be read.
+    AuditLog,
 }
 
 impl fmt::Display for SessionError {
@@ -148,6 +170,7 @@ impl fmt::Display for SessionError {
             Self::VaultUnreadable => f.write_str("vault file can't be read"),
             Self::Storage => StorageError::Io.fmt(f),
             Self::Randomness => CryptoError::Randomness.fmt(f),
+            Self::AuditLog => f.write_str("audit log can't be read"),
         }
     }
 }
@@ -232,6 +255,8 @@ pub enum Saved {
 /// Dropping it, [`Session::lock`], auto-lock or a conflict wipes everything it holds.
 ///
 /// ```
+/// # use std::sync::Arc;
+/// # use vault_core::audit::MemorySink;
 /// # use vault_core::crypto::MasterPassword;
 /// # use vault_core::session::{Session, SessionConfig};
 /// # use vault_core::storage::SqliteStore;
@@ -239,7 +264,7 @@ pub enum Saved {
 /// # let store = SqliteStore::new(dir.path())?;
 /// let password = MasterPassword::new("correct horse battery".into());
 /// let session =
-///     Session::create_insecure_for_tests(store, "alice", &password, SessionConfig::default())?;
+///     Session::create_insecure_for_tests(store, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
 /// session.lock();
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -251,6 +276,7 @@ pub struct Session<S: VaultStore> {
     open: Option<OpenVault>,
     last_used: Instant,
     warned_memory_unlocked: bool,
+    warned_audit_failed: bool,
 }
 
 /// What an unlocked session holds.
@@ -280,12 +306,14 @@ impl<S: VaultStore> Session<S> {
     /// vaultname ([`SessionError::VaultExists`]); costs one 256 MiB Argon2id run.
     ///
     /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// let store = SqliteStore::new("/home/alice/.local/share/secure-pass-manager/vaults")?;
     /// let password = MasterPassword::new("correct horse battery".into());
-    /// let session = Session::create(store, "alice", &password, SessionConfig::default())?;
+    /// let session = Session::create(store, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn create(
@@ -303,13 +331,15 @@ impl<S: VaultStore> Session<S> {
     /// feature, which release builds refuse.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default(),
+    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -348,31 +378,36 @@ impl<S: VaultStore> Session<S> {
         let plaintext = body::encode(&secrets);
         let (key, sealed) = seal_new(password, &plaintext)?;
         store.create(&vaultname, &sealed)?;
-        tracing::info!(event = "vault_created", vaultname = %vaultname);
         let vault = OpenVault {
             key,
             header: sealed.header,
             secrets,
         };
-        Ok(Self::opened(store, vaultname, config, vault, &plaintext))
+        let mut session = Self::opened(store, vaultname, config, vault, &plaintext);
+        session.record(Event::VaultCreated);
+        Ok(session)
     }
 
     /// Unlocks the vault named `vaultname` with `password`.
     ///
     /// Security: a missing vault, a wrong master password and a tampered header all
     /// give [`SessionError::UnlockFailed`] after the same Argon2id cost and at least one
-    /// second. The failure is logged with the vaultname only if that vault exists, so a
-    /// password typed into the vaultname prompt by mistake doesn't end up in the log.
+    /// second. A wrong master password is recorded in the vault's audit log within that
+    /// second, so the write can't reveal that the vault exists; a missing vault records
+    /// nothing and creates no file.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig, SessionError};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
+    /// # let config = || SessionConfig::new(Arc::new(MemorySink::default()));
+    /// # Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, config())?;
     /// let wrong = MasterPassword::new("wrong guess".into());
-    /// let result = Session::unlock(SqliteStore::new(dir.path())?, "alice", &wrong, SessionConfig::default());
+    /// let result = Session::unlock(SqliteStore::new(dir.path())?, "alice", &wrong, config());
     /// assert_eq!(result.err(), Some(SessionError::UnlockFailed));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -384,10 +419,11 @@ impl<S: VaultStore> Session<S> {
     ) -> Result<Self, SessionError> {
         let vaultname = Vaultname::parse(vaultname)?;
         let started = config.clock.now();
-        match open_vault(&store, &vaultname, password) {
+        match open_vault(&store, &vaultname, password, &config) {
             Ok((vault, plaintext)) => {
-                tracing::info!(event = "unlocked", vaultname = %vaultname);
-                Ok(Self::opened(store, vaultname, config, vault, &plaintext))
+                let mut session = Self::opened(store, vaultname, config, vault, &plaintext);
+                session.record(Event::Unlocked);
+                Ok(session)
             }
             Err(err) => {
                 wait_out_failure(config.clock.as_ref(), started);
@@ -416,6 +452,7 @@ impl<S: VaultStore> Session<S> {
             open: Some(vault),
             last_used,
             warned_memory_unlocked: false,
+            warned_audit_failed: false,
         };
         session.check_memory_locked(plaintext.is_memory_locked());
         session
@@ -424,13 +461,15 @@ impl<S: VaultStore> Session<S> {
     /// The vaultname this session unlocked.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "Alice", &password, SessionConfig::default(),
+    ///     SqliteStore::new(dir.path())?, "Alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// assert_eq!(session.vaultname().as_str(), "alice");
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -444,12 +483,14 @@ impl<S: VaultStore> Session<S> {
     /// passed; checking doesn't count as activity.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// assert!(session.is_unlocked());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -458,16 +499,18 @@ impl<S: VaultStore> Session<S> {
         self.open.is_some()
     }
 
-    /// The secret titled `title` (ignoring case and surrounding spaces). Hidden fields
-    /// stay masked until [`HiddenValue::reveal`] is called on one.
+    /// The secret titled `title` (ignoring case and surrounding spaces), for showing it
+    /// masked. To show or copy hidden fields, use [`Session::reveal`], which records it.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Secret, Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// session.save(Secret::new("GitHub").with_username("alice"))?;
     /// assert_eq!(session.get("github")?.username(), Some("alice"));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -480,16 +523,79 @@ impl<S: VaultStore> Session<S> {
             .ok_or(SessionError::SecretNotFound)
     }
 
-    /// Whether a secret titled `title` exists (ignoring case), e.g. to ask before
-    /// overwriting it.
+    /// Reveals the secret titled `title`: runs `f` on it, where the front end shows or
+    /// copies its hidden fields, and records the reveal if `f` succeeds.
+    ///
+    /// Security: front ends must reveal hidden fields only through this, never through
+    /// [`Session::get`], so every reveal is in the audit log. A failing `f` records
+    /// nothing, as nothing was revealed.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
+    /// # use vault_core::crypto::MasterPassword;
+    /// # use vault_core::session::{HiddenValue, Secret, Session, SessionConfig, SessionError};
+    /// # use vault_core::storage::SqliteStore;
+    /// # let dir = tempfile::tempdir()?;
+    /// # let password = MasterPassword::new("correct horse battery".into());
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// session.save(Secret::new("GitHub").with_password(HiddenValue::new("s3cret!".into())))?;
+    /// session.reveal("github", |secret| {
+    ///     println!("{}", secret.password().map_or("", HiddenValue::reveal));
+    ///     Ok::<_, SessionError>(())
+    /// })?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn reveal<R, E: From<SessionError>>(
+        &mut self,
+        title: &str,
+        f: impl FnOnce(&Secret) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let secret = self.get(title)?;
+        let title = secret.title().to_owned();
+        let result = f(secret)?;
+        self.record(Event::SecretRevealed { title });
+        Ok(result)
+    }
+
+    /// Up to `limit` of this vault's audit log lines, newest first.
+    ///
+    /// Security: only the vault this session unlocked; [`SessionError::Locked`] once
+    /// locked. Titles in it are plaintext as stored: escape them before display.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// let newest = session.audit_log(20)?;
+    /// assert_eq!(newest.len(), 1); // the vault was just created
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn audit_log(&mut self, limit: usize) -> Result<Vec<Line>, SessionError> {
+        self.vault()?;
+        self.config
+            .audit
+            .read_recent(&self.vaultname, limit)
+            .map_err(|_| SessionError::AuditLog)
+    }
+
+    /// Whether a secret titled `title` exists (ignoring case), e.g. to ask before
+    /// overwriting it.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
+    /// # use vault_core::crypto::MasterPassword;
+    /// # use vault_core::session::{Session, SessionConfig};
+    /// # use vault_core::storage::SqliteStore;
+    /// # let dir = tempfile::tempdir()?;
+    /// # let password = MasterPassword::new("correct horse battery".into());
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// assert!(!session.contains("github")?);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -505,12 +611,14 @@ impl<S: VaultStore> Session<S> {
     /// non-hidden fields.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Secret, Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// session.save(Secret::new("gitlab"))?;
     /// session.save(Secret::new("GitHub"))?;
     /// let titles: Vec<_> = session.list()?.iter().map(|s| s.title()).collect();
@@ -531,12 +639,14 @@ impl<S: VaultStore> Session<S> {
     /// nothing changes.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{HiddenValue, Saved, Secret, Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// let github = Secret::new("GitHub").with_password(HiddenValue::new("s3cret!".into()));
     /// assert_eq!(session.save(github)?, Saved::Added);
     /// assert_eq!(session.save(Secret::new("github"))?, Saved::Replaced);
@@ -551,6 +661,7 @@ impl<S: VaultStore> Session<S> {
             .iter()
             .position(|stored| stored.has_title(secret.title()));
         secret.stamp(existing.map(|i| vault.secrets[i].created_at()), now);
+        let title = secret.title().to_owned();
         let (saved, undo) = match existing {
             Some(i) => (
                 Saved::Replaced,
@@ -562,19 +673,24 @@ impl<S: VaultStore> Session<S> {
             }
         };
         self.persist(undo)?;
-        tracing::info!(event = "secret_saved", vaultname = %self.vaultname);
+        self.record(match saved {
+            Saved::Added => Event::SecretAdded { title },
+            Saved::Replaced => Event::SecretReplaced { title },
+        });
         Ok(saved)
     }
 
     /// Removes the secret titled `title` (ignoring case) and writes the vault at once.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Secret, Session, SessionConfig, SessionError};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default())?;
+    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// session.save(Secret::new("GitHub"))?;
     /// session.remove("github")?;
     /// assert_eq!(session.remove("github"), Err(SessionError::SecretNotFound));
@@ -588,8 +704,9 @@ impl<S: VaultStore> Session<S> {
             .position(|secret| secret.has_title(title))
             .ok_or(SessionError::SecretNotFound)?;
         let removed = vault.secrets.remove(i);
+        let title = removed.title().to_owned();
         self.persist(Undo::Insert(i, removed))?;
-        tracing::info!(event = "secret_removed", vaultname = %self.vaultname);
+        self.record(Event::SecretRemoved { title });
         Ok(())
     }
 
@@ -601,13 +718,15 @@ impl<S: VaultStore> Session<S> {
     /// create ([`WeakMasterPassword`]).
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// let old = MasterPassword::new("correct horse battery".into());
     /// let mut session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "alice", &old, SessionConfig::default(),
+    ///     SqliteStore::new(dir.path())?, "alice", &old, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// session.change_master_password(&old, &MasterPassword::new("tr0ub4dor & 3 staples".into()))?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -621,45 +740,74 @@ impl<S: VaultStore> Session<S> {
         let vault = self.vault()?;
         master_password_policy::check(new)?;
         let plaintext = body::encode(&vault.secrets);
-        let (key, sealed) = match crypto::change_master_password(
-            &vault.header,
-            current,
-            new,
-            &plaintext,
-        ) {
-            Err(CryptoError::UnlockFailed) => {
-                tracing::warn!(event = "master_password_change_failed", vaultname = %self.vaultname);
-                wait_out_failure(self.config.clock.as_ref(), started);
-                return Err(SessionError::UnlockFailed);
-            }
-            result => result?,
-        };
+        let (key, sealed) =
+            match crypto::change_master_password(&vault.header, current, new, &plaintext) {
+                Err(CryptoError::UnlockFailed) => {
+                    self.record(Event::MasterPasswordChangeFailed);
+                    wait_out_failure(self.config.clock.as_ref(), started);
+                    return Err(SessionError::UnlockFailed);
+                }
+                result => result?,
+            };
         self.write(&sealed)?;
         let vault = self.open.as_mut().expect("written while unlocked");
         vault.key = key;
         vault.header = sealed.header;
         self.check_memory_locked(plaintext.is_memory_locked());
-        tracing::info!(event = "master_password_changed", vaultname = %self.vaultname);
+        self.record(Event::MasterPasswordChanged);
         Ok(())
     }
 
     /// Locks the vault: ends the session and wipes its keys and secrets.
     ///
     /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
     /// # use vault_core::storage::SqliteStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::default(),
+    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// session.lock(); // `session` can't be used any more
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn lock(mut self) {
+    pub fn lock(self) {
+        self.lock_recording(Event::Locked);
+    }
+
+    /// Locks the vault because a termination signal arrived, like [`Session::lock`]
+    /// but recorded as such.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
+    /// # use vault_core::crypto::MasterPassword;
+    /// # use vault_core::session::{Session, SessionConfig};
+    /// # use vault_core::storage::SqliteStore;
+    /// # let dir = tempfile::tempdir()?;
+    /// # let password = MasterPassword::new("correct horse battery".into());
+    /// let session = Session::create_insecure_for_tests(
+    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    /// )?;
+    /// session.lock_on_signal(); // e.g. from a SIGTERM handler
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn lock_on_signal(self) {
+        self.lock_recording(Event::TerminatedBySignal);
+    }
+
+    /// Ends the session, recording `event` if it was still unlocked (an auto-lock or
+    /// conflict was already recorded).
+    ///
+    /// ```ignore
+    /// self.lock_recording(Event::Locked);
+    /// ```
+    fn lock_recording(mut self, event: Event) {
         if self.is_unlocked() {
-            tracing::info!(event = "locked", vaultname = %self.vaultname);
+            self.record(event);
         }
         // Dropping `self` zeroizes the vault key, the secrets and their locked pages.
     }
@@ -687,7 +835,7 @@ impl<S: VaultStore> Session<S> {
         let idle = now.saturating_duration_since(self.last_used);
         if self.open.is_some() && idle >= self.config.idle_timeout {
             self.open = None;
-            tracing::info!(event = "auto_locked", vaultname = %self.vaultname);
+            self.record(Event::AutoLocked);
         }
     }
 
@@ -732,10 +880,23 @@ impl<S: VaultStore> Session<S> {
         match self.store.save(&self.vaultname, sealed) {
             Err(StorageError::Conflict) => {
                 self.open = None;
-                tracing::warn!(event = "locked_on_conflict", vaultname = %self.vaultname);
+                self.record(Event::LockedOnConflict);
                 Err(SessionError::Conflict)
             }
             result => result.map_err(SessionError::from),
+        }
+    }
+
+    /// Records `event` in this vault's audit log. A failed write never fails the caller;
+    /// it logs one `audit_write_failed` warning per session.
+    ///
+    /// ```ignore
+    /// self.record(Event::Locked);
+    /// ```
+    fn record(&mut self, event: Event) {
+        if !append_event(&self.config, &self.vaultname, event) && !self.warned_audit_failed {
+            self.warned_audit_failed = true;
+            tracing::warn!(event = "audit_write_failed", vaultname = %self.vaultname);
         }
     }
 
@@ -776,28 +937,31 @@ impl Undo {
 /// the caller can check its memory was locked.
 ///
 /// Security: a missing vault runs [`crypto::simulate_unlock`] and fails like a wrong
-/// master password; see [`Session::unlock`].
+/// master password, recording nothing; a wrong master password for an existing vault
+/// is recorded in its audit log. See [`Session::unlock`].
 ///
 /// ```ignore
-/// let (vault, plaintext) = open_vault(&store, &vaultname, &password)?;
+/// let (vault, plaintext) = open_vault(&store, &vaultname, &password, &config)?;
 /// ```
 fn open_vault(
     store: &impl VaultStore,
     vaultname: &Vaultname,
     password: &MasterPassword,
+    config: &SessionConfig,
 ) -> Result<(OpenVault, Plaintext), SessionError> {
     let sealed = match store.load(vaultname) {
         Err(StorageError::NotFound) => {
             // Only the cost matters; even a randomness failure must fail the same way.
             let _ = crypto::simulate_unlock(password);
-            tracing::warn!(event = "unlock_failed");
             return Err(SessionError::UnlockFailed);
         }
         result => result?,
     };
     let key = crypto::unlock(&sealed.header, password).inspect_err(|err| {
-        if *err == CryptoError::UnlockFailed {
-            tracing::warn!(event = "unlock_failed", vaultname = %vaultname);
+        if *err == CryptoError::UnlockFailed
+            && !append_event(config, vaultname, Event::UnlockFailed)
+        {
+            tracing::warn!(event = "audit_write_failed", vaultname = %vaultname);
         }
     })?;
     let plaintext = crypto::open_body(&key, &sealed)?;
@@ -808,6 +972,21 @@ fn open_vault(
         secrets,
     };
     Ok((vault, plaintext))
+}
+
+/// Appends `event`, stamped with the config's clock, to `vaultname`'s audit log;
+/// `false` if the write failed.
+///
+/// ```ignore
+/// if !append_event(&config, &vaultname, Event::UnlockFailed) { /* warn */ }
+/// ```
+fn append_event(config: &SessionConfig, vaultname: &Vaultname, event: Event) -> bool {
+    let seconds = i64::try_from(config.clock.unix_time()).unwrap_or(i64::MAX);
+    let time = DateTime::from_timestamp(seconds, 0).unwrap_or_default();
+    config
+        .audit
+        .append(vaultname, &Record { time, event })
+        .is_ok()
 }
 
 /// Sleeps until [`MIN_UNLOCK_FAILURE`] has passed since `started`.

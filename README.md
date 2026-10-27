@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested; audit and backup are still stubs, and the web front end is not started.
+> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested; backup is still a stub, and the web front end is not started.
 
 ## Project layout
 
@@ -22,6 +22,7 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── tests/crypto.rs     # encryption module behaviour, through its public API
 │   ├── tests/storage.rs    # storage module behaviour, through its public API
 │   ├── tests/session.rs    # session module behaviour, through its public API
+│   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
 │   ├── tests/generator.rs  # password generator behaviour, through its public API
 │   └── src/
 │       ├── lib.rs
@@ -30,23 +31,23 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── generator.rs    # Password generator: uniform visible-ASCII passwords from the OS CSPRNG
 │       ├── storage.rs      # Storage: one vault home per vaultname holding `secrets.vault`, a SQLite file (header + encrypted body); hardened open, revision-checked saves (ADR-0006, ADR-0009)
 │       ├── storage/        # vaultname validation
-│       ├── audit.rs        # Audit log: structured events, never secrets
+│       ├── audit.rs        # Audit log: typed events as JSON Lines in `audit.log` per vault home, at most a title, rotated at 1 MiB, fail-open (ADR-0010)
 │       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
-│       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once (single user in MVP)
+│       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once, records audit events (single user in MVP)
 │       └── session/        # secret model + field validation, JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
-│   ├── tests/render.rs     # terminal output (get view, list table, escaping), through its public API
+│   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping), through its public API
 │   ├── tests/shell.rs      # the CLI and vault shell end to end, on a scripted fake terminal
 │   └── src/
 │       ├── main.rs         # hardens the process, logs warnings to stderr, runs the CLI on the real terminal
 │       ├── lib.rs
 │       ├── args.rs         # command grammar (clap): `vault` arguments and vault shell commands
 │       ├── shell.rs        # init/unlock (3 tries), the vault shell loop, auto-lock watcher, termination signals
-│       ├── commands.rs     # get, save, list, rm, gen, passwd, lock; prompts first, then the session
+│       ├── commands.rs     # get, save, list, rm, gen, passwd, log, lock; prompts first, then the session
 │       ├── clipboard.rs    # `--copy`: excluded from clipboard history, cleared after 20 s, on lock and exit
 │       ├── terminal.rs     # Terminal trait (fakeable in tests) and the real stdin/stdout one; in-memory history only
 │       ├── terminal/       # masked prompt: one `*` per character, zeroizing buffer (ADR-0008)
-│       └── render.rs       # get view and list table; escapes control and bidi characters; hidden fields shown as `*`
+│       └── render.rs       # get view, list table and log view; escapes control and bidi characters; hidden fields shown as `*`
 │
 │   # planned, not created yet
 ├── vault-web/              # HTTP server: TLS, sessions, CSRF, authz; serves the client bundle
@@ -105,15 +106,20 @@ generated a 24-character password; `get <title> --copy` copies it
 secret added
 vault> get github --copy
 password copied; the clipboard clears in 20 seconds
+vault> log --limit 3
+2026-10-27 10:47:12  secret revealed 'github'
+2026-10-27 10:47:05  secret added 'github'
+2026-10-27 10:46:51  unlocked
 vault> lock
 vault locked
 ```
 
 All commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands). Notes:
 
-- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux), each in its own vault home: `vaults/<vaultname>/secrets.vault`. `--vault-dir <path>` uses another vault directory.
+- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
 - The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused.
 - The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
+- `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes. It holds titles in plaintext but never a field value.
 - `--copy` needs a display (X11 or Wayland on Linux); over plain SSH it reports that the clipboard is not available.
 - If the process is killed by a signal while waiting at the `vault>` prompt, the vault is wiped, but the terminal can be left in raw mode; type `reset` to fix it.
 

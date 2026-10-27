@@ -1,8 +1,11 @@
-//! Behaviour of the CLI's terminal output (`get` view, `list` table, escaping), tested
-//! only through its public API.
+//! Behaviour of the CLI's terminal output (`get` view, `list` table, `log` lines,
+//! escaping), tested only through its public API.
 
-use chrono::Utc;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
 use vault_cli::render::{self, Reveal};
+use vault_core::audit::{Event, Line, MemorySink, Record};
 use vault_core::crypto::MasterPassword;
 use vault_core::session::{CustomField, HiddenValue, Secret, Session, SessionConfig};
 use vault_core::storage::SqliteStore;
@@ -121,7 +124,7 @@ fn saved_secret_view_shows_created_and_updated_times() -> Result<(), Box<dyn std
         SqliteStore::new(dir.path())?,
         "alice",
         &password,
-        SessionConfig::default(),
+        SessionConfig::new(Arc::new(MemorySink::default())),
     )?;
     session.save(Secret::new("GitHub"))?;
 
@@ -175,4 +178,54 @@ fn list_escapes_stored_text() {
 #[test]
 fn empty_list_says_so() {
     assert_eq!(render::secret_list(&[]).as_str(), "no secrets yet");
+}
+
+/// `event` at Unix second `seconds`, as a readable log line.
+///
+/// ```text
+/// render::audit_log(&[logged(0, Event::Locked)], &Utc)
+/// ```
+fn logged(seconds: i64, event: Event) -> Line {
+    Line::Record(Record {
+        time: DateTime::from_timestamp(seconds, 0).unwrap(),
+        event,
+    })
+}
+
+#[test]
+fn audit_log_shows_one_line_per_event_with_time_and_title() {
+    let lines = [
+        logged(
+            1_767_225_661,
+            Event::SecretRevealed {
+                title: "my bank".into(),
+            },
+        ),
+        logged(1_767_225_600, Event::UnlockFailed),
+        Line::Unreadable,
+    ];
+    assert_eq!(
+        render::audit_log(&lines, &Utc).as_str(),
+        "2026-01-01 00:01:01  secret revealed 'my bank'\n\
+         2026-01-01 00:00:00  unlock failed (wrong master password)\n\
+         <unreadable event>"
+    );
+}
+
+#[test]
+fn audit_log_escapes_titles_from_a_crafted_log() {
+    let crafted = logged(
+        0,
+        Event::SecretRemoved {
+            title: "evil\u{1b}[2J\u{202e}".into(),
+        },
+    );
+    let text = render::audit_log(&[crafted], &Utc);
+    assert!(!text.contains('\u{1b}') && !text.contains('\u{202e}'));
+    assert!(text.ends_with(r"secret removed 'evil\x1b[2J\u{202e}'"));
+}
+
+#[test]
+fn empty_audit_log_says_so() {
+    assert_eq!(render::audit_log(&[], &Utc).as_str(), "no audit events yet");
 }

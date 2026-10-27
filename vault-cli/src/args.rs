@@ -12,6 +12,9 @@ use vault_core::generator::DEFAULT_PASSWORD_LENGTH;
 /// Idle minutes before a session locks itself, unless `--idle-timeout` says otherwise.
 pub const DEFAULT_IDLE_MINUTES: u64 = 5;
 
+/// Audit events `log` shows, unless `--limit` says otherwise.
+pub const DEFAULT_LOG_LIMIT: u16 = 20;
+
 /// `vault`: a local password manager with one encrypted vault per person.
 ///
 /// ```
@@ -117,6 +120,17 @@ pub enum ShellCommand {
     Gen(Gen),
     /// Change the master password
     Passwd,
+    /// Show the audit log, newest first
+    Log {
+        /// How many audit events to show (1-1000)
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_LOG_LIMIT,
+            value_parser = clap::value_parser!(u16).range(1..=1000),
+        )]
+        limit: u16,
+    },
     /// Lock the vault and leave the shell
     #[command(visible_aliases = ["exit", "quit"])]
     Lock,
@@ -133,6 +147,6 @@ pub enum ShellCommand {
 pub fn is_shell_only(name: &str) -> bool {
     matches!(
         name,
-        "get" | "save" | "list" | "rm" | "passwd" | "lock" | "exit" | "quit"
+        "get" | "save" | "list" | "rm" | "passwd" | "log" | "lock" | "exit" | "quit"
     )
 }

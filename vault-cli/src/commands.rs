@@ -1,4 +1,5 @@
-//! The commands of the vault shell (`get`, `save`, `list`, `rm`, `gen`, `passwd`, `lock`).
+//! The commands of the vault shell (`get`, `save`, `list`, `rm`, `gen`, `passwd`, `log`,
+//! `lock`).
 //!
 //! Every command reads what it needs from the person first and only then takes the
 //! session, so a prompt left waiting never holds the vault open: auto-lock can wipe it
@@ -9,6 +10,8 @@
 //!   straight into `HiddenValue` / `MasterPassword`.
 //! - `get --show` refuses when stdout is not a terminal, so hidden fields never end up in
 //!   a pipe or a file.
+//! - `get --show` and `get --copy` go through `Session::reveal`, so every reveal is in
+//!   the audit log; a masked `get` is not.
 //! - Error messages are fixed strings; none includes a field value.
 
 use std::fmt;
@@ -143,6 +146,7 @@ pub(crate) fn execute(
         ShellCommand::Rm { title } => remove(terminal, session, &title)?,
         ShellCommand::Gen(options) => generate(terminal, options.length)?,
         ShellCommand::Passwd => change_master_password(terminal, session)?,
+        ShellCommand::Log { limit } => log(terminal, session, limit.into())?,
         ShellCommand::Lock => return Ok(Flow::Lock),
     }
     Ok(Flow::Continue)
@@ -180,11 +184,10 @@ fn get(
 ) -> Result<(), CommandError> {
     if copy {
         with_session(session, |session| {
-            let password = session
-                .get(title)?
-                .password()
-                .ok_or(CommandError::NoPassword)?;
-            Ok(terminal.copy_to_clipboard(password)?)
+            session.reveal(title, |secret| {
+                let password = secret.password().ok_or(CommandError::NoPassword)?;
+                Ok(terminal.copy_to_clipboard(password)?)
+            })
         })?;
         terminal.print(&format!(
             "password copied; the clipboard clears in {} seconds",
@@ -195,9 +198,14 @@ fn get(
     if show && !terminal.stdout_is_terminal() {
         return Err(CommandError::NotATerminal);
     }
-    let reveal = if show { Reveal::Shown } else { Reveal::Masked };
     let view = with_session(session, |session| {
-        Ok(render::secret(session.get(title)?, reveal, &Local))
+        if show {
+            session.reveal(title, |secret| {
+                Ok::<_, CommandError>(render::secret(secret, Reveal::Shown, &Local))
+            })
+        } else {
+            Ok(render::secret(session.get(title)?, Reveal::Masked, &Local))
+        }
     })?;
     terminal.print(&view);
     Ok(())
@@ -345,6 +353,21 @@ fn change_master_password(
         Ok(session.change_master_password(&current, &new)?)
     })?;
     terminal.print("master password changed");
+    Ok(())
+}
+
+/// `log`: prints up to `limit` audit events of this vault, newest first, in local time.
+///
+/// ```ignore
+/// log(terminal, session, 20)?;
+/// ```
+fn log(
+    terminal: &mut dyn Terminal,
+    session: &SharedSession,
+    limit: usize,
+) -> Result<(), CommandError> {
+    let lines = with_session(session, |session| Ok(session.audit_log(limit)?))?;
+    terminal.print(&render::audit_log(&lines, &Local));
     Ok(())
 }
 

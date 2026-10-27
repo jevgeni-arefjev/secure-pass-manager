@@ -17,6 +17,7 @@ insecure-test-kdf = []
 [dependencies]
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+chrono = { version = "0.4.45", default-features = false, features = ["alloc", "serde"] }
 getrandom = "0.4"
 hkdf = "0.13"
 region = { version = "4.0", default-features = false }
@@ -30,6 +31,7 @@ unicode-normalization = "0.1.26"
 zeroize = { version = "1.9", features = ["derive", "serde"] }
 
 [target."cfg(unix)".dependencies]
+libc = "0.2"
 rlimit = "0.11"
 
 [dev-dependencies]

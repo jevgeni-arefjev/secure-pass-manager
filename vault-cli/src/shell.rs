@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
+use vault_core::audit::{AuditSink, FileSink};
 use vault_core::crypto::MasterPassword;
 use vault_core::generator;
 use vault_core::session::{Clock, Session, SessionConfig, SessionError};
@@ -190,10 +191,11 @@ fn open_vault(
             &"no data directory found; pass --vault-dir <PATH>",
         );
     };
-    let store = match SqliteStore::new(dir) {
+    let store = match SqliteStore::new(&dir) {
         Ok(store) => store,
         Err(err) => return fail(terminal, &err),
     };
+    let audit: Arc<dyn AuditSink> = Arc::new(FileSink::new(dir));
     let vaultname = match &open.vaultname {
         Some(name) => name.trim().to_owned(),
         None => match terminal.read_line("Vaultname: ") {
@@ -208,6 +210,7 @@ fn open_vault(
     let config = || SessionConfig {
         idle_timeout,
         clock: Arc::clone(&env.clock),
+        audit: Arc::clone(&audit),
     };
     let session = match opening {
         Opening::Create => create(terminal, &store, &name, &config),
@@ -424,7 +427,8 @@ mod signals {
     use crate::commands::SharedSession;
     use crate::terminal::TerminalHandle;
 
-    /// On SIGTERM, SIGHUP, SIGINT or SIGQUIT: wipes the session, clears the clipboard,
+    /// On SIGTERM, SIGHUP, SIGINT or SIGQUIT: wipes the session (recording it in the
+    /// audit log), clears the clipboard,
     /// restores the terminal if our masked prompt had it in raw mode, and exits with
     /// 128 + the signal number. If the handler can't be installed, the default action
     /// (exit without wiping) stays, and a warning is logged.
@@ -447,7 +451,7 @@ mod signals {
                     .unwrap_or_else(PoisonError::into_inner)
                     .take()
                 {
-                    open.lock();
+                    open.lock_on_signal();
                 }
                 handle.clear_clipboard();
                 let _ = crossterm::terminal::disable_raw_mode();

@@ -1,4 +1,5 @@
-//! Turns secrets into terminal text: the `get` view and the `list` table.
+//! Turns secrets and audit events into terminal text: the `get` view, the `list` table
+//! and the `log` view.
 //!
 //! Security:
 //! - Every stored text is escaped before it reaches the terminal ([`escape`]): control
@@ -13,6 +14,7 @@ use std::fmt::{Display, Write};
 
 use chrono::{TimeZone, Utc};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use vault_core::audit::{Event, Line};
 use vault_core::session::{FieldValue, HiddenValue, Secret};
 use zeroize::Zeroizing;
 
@@ -170,6 +172,77 @@ pub fn secret_list(secrets: &[&Secret]) -> Zeroizing<String> {
         out.push_str(line.trim_end());
     }
     out
+}
+
+/// The `log` view: one `YYYY-MM-DD HH:MM:SS  <what happened>` line per audit log line,
+/// in the given order, with times in `tz`. A line that didn't parse shows as
+/// `<unreadable event>`.
+///
+/// Security: titles come from a plaintext file anyone with access to the vault home
+/// could have edited, so they are escaped like all stored text.
+///
+/// ```
+/// use chrono::{DateTime, Utc};
+/// use vault_cli::render;
+/// use vault_core::audit::{Event, Line, Record};
+///
+/// let time = DateTime::from_timestamp(1_767_225_600, 0).unwrap();
+/// let lines = [Line::Record(Record { time, event: Event::Unlocked }), Line::Unreadable];
+/// assert_eq!(
+///     render::audit_log(&lines, &Utc).as_str(),
+///     "2026-01-01 00:00:00  unlocked\n<unreadable event>"
+/// );
+/// ```
+#[must_use]
+pub fn audit_log<Tz>(lines: &[Line], tz: &Tz) -> Zeroizing<String>
+where
+    Tz: TimeZone,
+    Tz::Offset: Display,
+{
+    if lines.is_empty() {
+        return Zeroizing::new("no audit events yet".to_owned());
+    }
+    let mut out = Zeroizing::new(String::new());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let Line::Record(record) = line else {
+            out.push_str("<unreadable event>");
+            continue;
+        };
+        let time = record.time.with_timezone(tz).format("%Y-%m-%d %H:%M:%S");
+        let _ = write!(out, "{time}  {}", describe(&record.event));
+        if let Some(title) = record.event.title() {
+            let _ = write!(out, " '{}'", escape(title, false).as_str());
+        }
+    }
+    out
+}
+
+/// What an audit event means, in words, without its title.
+///
+/// ```ignore
+/// assert_eq!(describe(&Event::AutoLocked), "locked (idle)");
+/// ```
+fn describe(event: &Event) -> &'static str {
+    match event {
+        Event::VaultCreated => "vault created",
+        Event::Unlocked => "unlocked",
+        Event::UnlockFailed => "unlock failed (wrong master password)",
+        Event::Locked => "locked",
+        Event::AutoLocked => "locked (idle)",
+        Event::LockedOnConflict => "locked (changed by another session)",
+        Event::TerminatedBySignal => "locked (terminated by signal)",
+        Event::SecretAdded { .. } => "secret added",
+        Event::SecretReplaced { .. } => "secret replaced",
+        Event::SecretRemoved { .. } => "secret removed",
+        Event::SecretRevealed { .. } => "secret revealed",
+        Event::MasterPasswordChanged => "master password changed",
+        Event::MasterPasswordChangeFailed => {
+            "master password change failed (wrong current password)"
+        }
+    }
 }
 
 /// Whether `c` is an invisible or bidirectional formatting character (zero-width

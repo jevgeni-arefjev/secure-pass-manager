@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use vault_cli::shell::{self, Env, Exit};
 use vault_cli::terminal::{Terminal, TerminalError, TerminalHandle};
+use vault_core::audit::FileSink;
 use vault_core::crypto::MasterPassword;
 use vault_core::session::{Clock, HiddenValue, Session, SessionConfig};
 use vault_core::storage::SqliteStore;
@@ -252,7 +253,8 @@ impl Fixture {
         let fx = Self::new();
         let store = SqliteStore::new(fx.dir.path()).unwrap();
         let password = MasterPassword::new(PASSWORD.to_owned());
-        Session::create_insecure_for_tests(store, "alice", &password, SessionConfig::default())
+        let config = SessionConfig::new(Arc::new(FileSink::new(fx.dir.path())));
+        Session::create_insecure_for_tests(store, "alice", &password, config)
             .unwrap()
             .lock();
         fx
@@ -788,4 +790,97 @@ fn help_in_the_shell_lists_the_commands() {
     for command in ["get", "save", "list", "rm", "gen", "lock"] {
         assert!(help.contains(command), "{command} missing from help");
     }
+}
+
+// --- log ------------------------------------------------------------------------------
+
+/// The event descriptions of the last `log` output, without their timestamps, newest
+/// first.
+///
+/// ```text
+/// assert_eq!(logged_events(&t), ["unlocked", "locked", "vault created"]);
+/// ```
+fn logged_events(t: &FakeTerminal) -> Vec<String> {
+    let log = t
+        .out
+        .iter()
+        .rev()
+        .find(|out| out.contains("vault created"))
+        .expect("no log output");
+    log.lines()
+        .map(|line| match line.get(..21) {
+            // "YYYY-MM-DD HH:MM:SS  "
+            Some(time) if time.as_bytes()[4] == b'-' && time.ends_with("  ") => {
+                line[21..].to_owned()
+            }
+            _ => line.to_owned(),
+        })
+        .collect()
+}
+
+#[test]
+fn log_shows_reveals_and_changes_newest_first_but_not_masked_views() {
+    let fx = Fixture::with_alice();
+    let (exit, t) = fx.shell(with_github(vec![
+        line("get github"),
+        line("list"),
+        line("get github --show"),
+        line("get github --copy"),
+        line("log"),
+    ]));
+    assert_eq!(exit, Exit::Success);
+    assert_eq!(
+        logged_events(&t),
+        [
+            "secret revealed 'github'",
+            "secret revealed 'github'",
+            "secret added 'github'",
+            "unlocked",
+            "locked",
+            "vault created",
+        ]
+    );
+}
+
+#[test]
+fn log_limit_shows_only_the_newest_events() {
+    let fx = Fixture::with_alice();
+    let (_, t) = fx.shell(vec![line("log --limit 1"), line("lock")]);
+    assert!(t.stdout().lines().any(|l| l.ends_with("  unlocked")));
+    assert!(!t.stdout().contains("vault created"));
+}
+
+#[test]
+fn log_shows_a_failed_unlock_of_this_vault() {
+    let fx = Fixture::with_alice();
+    let (_, t) = fx.run(
+        &["unlock", "alice"],
+        vec![hidden("wrong guess"), hidden(PASSWORD), line("log")],
+    );
+    assert_eq!(
+        logged_events(&t)[..2],
+        ["unlocked", "unlock failed (wrong master password)"]
+    );
+}
+
+#[test]
+fn log_shows_lines_that_do_not_parse_as_unreadable() {
+    let fx = Fixture::with_alice();
+    let log = fx.dir.path().join("alice/audit.log");
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"\x1b[2J garbage\n");
+    std::fs::write(&log, bytes).unwrap();
+
+    let (_, t) = fx.shell(vec![line("log")]);
+    let events = logged_events(&t);
+    assert_eq!(events[1], "<unreadable event>");
+    assert!(!t.stdout().contains('\u{1b}'));
+}
+
+#[test]
+fn log_outside_the_vault_shell_points_to_unlock() {
+    let fx = Fixture::with_alice();
+    let (exit, t) = fx.run(&["log"], vec![]);
+    assert_eq!(exit, Exit::Usage);
+    assert!(t.stderr().contains("works inside the vault shell"));
 }
