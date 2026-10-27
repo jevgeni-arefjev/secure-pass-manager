@@ -18,6 +18,10 @@ _Avoid_: username, login, account name (those belong to a secret)
 The place on a device where all vaults live.
 _Avoid_: vault folder, data dir
 
+**Vault home**:
+The directory inside the vault directory that is named after a vaultname and holds that vault's file and its audit log; renaming it renames the vault.
+_Avoid_: vault subdirectory, user directory
+
 **Master password**:
 The password that unlocks a vault, and the only way to open it.
 _Avoid_: vault password
@@ -74,3 +78,17 @@ _Avoid_: auto-logout
 **Vault shell**:
 The interactive `vault>` prompt a CLI session runs in; leaving it locks the vault.
 _Avoid_: shell (on its own, that is the user's OS shell), REPL, console
+
+### Audit
+
+**Audit log**:
+The record of a vault's audit events, kept in its vault home and readable by its owner from the vault shell; it never holds a field value.
+_Avoid_: activity log, history (that is the vault shell's command history)
+
+**Audit event**:
+One security-relevant thing that happened to a vault, such as an unlock, a failed unlock, a lock, a saved or removed secret or a reveal; it names at most the title of the secret concerned.
+_Avoid_: log entry, audit entry (entry means a secret)
+
+**Diagnostic**:
+An operational warning printed to stderr, such as loose file permissions or memory that couldn't be locked; not an audit event and never written to the audit log.
+_Avoid_: calling it an audit event

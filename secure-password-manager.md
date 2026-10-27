@@ -58,11 +58,11 @@ sequenceDiagram
 
 ## 3. Design decisions
 
-**Vault format.** Each user's vault is a separate SQLite file (ADR-0006), named after its vaultname and created by `vault init`. The file name is the plain vaultname (not a hash), so a vault can still be found if its name is half-remembered; the contents stay encrypted. It holds a plaintext header + encrypted body (all secrets), header authenticated as associated data. This way it doesn't leak the number of secrets or existence of a specific secret (e.g. existence of a github account). A secret is everything needed to access one service: its credentials and metadata (title, username, password, URL, tags, ...).
+**Vault format.** Each user's vault is a separate SQLite file (ADR-0006), created by `vault init` as `secrets.vault` in its vault home, a directory named after its vaultname (ADR-0009). The directory name is the plain vaultname (not a hash), so a vault can still be found if its name is half-remembered; the contents stay encrypted. It holds a plaintext header + encrypted body (all secrets), header authenticated as associated data. This way it doesn't leak the number of secrets or existence of a specific secret (e.g. existence of a github account). A secret is everything needed to access one service: its credentials and metadata (title, username, password, URL, tags, ...).
 
 It is also impossible to read other users' secrets: a session only ever opens the one vault it unlocked, and another user's file will not decrypt even if somehow obtained.
 
-Header contains format version, salt, wrap nonce, wrapped vault key, revision counter, body nonce. The format version also fixes the KDF and its params, so no cost parameter is stored (ADR-0005). The vaultname is not in the header: it is only the file name, so renaming the file renames the vault and a backup can be restored under any name (ADR-0004).
+Header contains format version, salt, wrap nonce, wrapped vault key, revision counter, body nonce. The format version also fixes the KDF and its params, so no cost parameter is stored (ADR-0005). The vaultname is not in the header: it is only the name of the vault home, so renaming the vault home renames the vault and a backup can be restored under any name (ADR-0004, ADR-0009).
 
 Body is a JSON of all secrets *(may be changed later)*, padded to 4 KiB, rewritten whole on every save. Per-secret encryption leaks the number of secrets and their sizes and multiplies nonce management, wchih gains nothing in performance, since the app is so small.
 
@@ -110,8 +110,8 @@ They might forget to lock the vault, accidentally copy or display all their secr
 | Vault at rest | Crafted vault file attacking the SQLite parser (e.g. a restored backup from an untrusted place) | Every connection enables `SQLITE_DBCONFIG_DEFENSIVE` and `trusted_schema=OFF`, and checks `application_id` and `user_version` before reading any table (ADR-0006) |
 | Vault at rest | Old ciphertext left in the file after a save, e.g. the header wrapped under a rotated master password | `secure_delete=ON` zeroes freed pages. Accepted: blocks of the deleted rollback journal may remain on disk |
 | Vault at rest | Malicious crafted input reaching the parser or a query | #![forbid(unsafe_code)] and parameterized SQL; header parser fuzzed |
-| Vault at rest | Vaultname used as a file name: path traversal or overwriting another file | Vaultnames allowlisted (restricted charset and length); vault path is built only inside the vault directory; `init` refuses an existing vaultname |
-| Vault at rest | Vault file names reveal vaultnames to other local users | Accepted: keeps a vault recoverable when its name is forgotten; the contents stay encrypted |
+| Vault at rest | Vaultname used as a directory name: path traversal or overwriting another file | Vaultnames allowlisted (restricted charset and length); the vault home path is built only inside the vault directory; a vault home that is a symlink is refused; `init` refuses an existing vaultname |
+| Vault at rest | Vault home names reveal vaultnames to other local users | Accepted: keeps a vault recoverable when its name is forgotten; the contents stay encrypted |
 | Vault in memory | Memory dump or core file of a running process | Vault key in locked pages, zeroed on lock; core dumps disabled |
 | Vault in memory | Key paged to swap or a hibernation file | `mlock` the key material and the decrypted secrets, no swap allocations; if the decrypted body exceeds `RLIMIT_MEMLOCK` it falls back to zeroize-only, with a warning logged |
 | Vault in memory | Session left unattended | Auto-lock on idle timeout (default 5 minutes, 1-60 per unlock): a watcher thread wipes the keys the moment it passes, even while the shell waits for input, and clears the clipboard; the process exits on the next input. Locking on screen lock or suspend is planned, not implemented |

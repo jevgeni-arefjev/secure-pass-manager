@@ -28,7 +28,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
 │       ├── crypto/         # header encoding, KDF params, locked + zeroized secret memory
 │       ├── generator.rs    # Password generator: uniform visible-ASCII passwords from the OS CSPRNG
-│       ├── storage.rs      # Storage: one SQLite file per vault (header + encrypted body), hardened open, revision-checked saves (ADR-0006)
+│       ├── storage.rs      # Storage: one vault home per vaultname holding `secrets.vault`, a SQLite file (header + encrypted body); hardened open, revision-checked saves (ADR-0006, ADR-0009)
 │       ├── storage/        # vaultname validation
 │       ├── audit.rs        # Audit log: structured events, never secrets
 │       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
@@ -111,7 +111,7 @@ vault locked
 
 All commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands). Notes:
 
-- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux); `--vault-dir <path>` uses another one.
+- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux), each in its own vault home: `vaults/<vaultname>/secrets.vault`. `--vault-dir <path>` uses another vault directory.
 - The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused.
 - The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
 - `--copy` needs a display (X11 or Wayland on Linux); over plain SSH it reports that the clipboard is not available.

@@ -1,11 +1,13 @@
 //! Storage module: vault files on disk.
 //!
-//! One SQLite file per vault, `<vault directory>/<vaultname>.vault`, holding one row:
+//! Each vault has a vault home, `<vault directory>/<vaultname>/` (ADR-0009), holding its
+//! vault file `secrets.vault`: one SQLite file with one row:
 //! the encoded header, the encrypted body and the revision (ADR-0006). Storage only
 //! ever handles what crypto sealed ([`SealedVault`]); it never sees plaintext or keys.
 //!
 //! Security:
-//! - Vaultnames are allowlisted by [`Vaultname`] before they become file names.
+//! - Vaultnames are allowlisted by [`Vaultname`] before they become directory names;
+//!   a vault home that is a symlink or not a directory is refused.
 //! - Vault files may come from untrusted places, so every connection is opened with
 //!   SQLite's defensive mode and untrusted schema, and the file's `application_id` and
 //!   `user_version` are checked before any table is read.
@@ -13,8 +15,8 @@
 //!   header wrapped under a rotated master password) in the file.
 //! - A save is one transaction that only succeeds if the stored revision is the one
 //!   the new revision follows, so two sessions can't silently overwrite each other.
-//! - The vault directory is `0700` and vault files `0600` (Unix); looser permissions
-//!   are logged as a warning and the vault still opens.
+//! - The vault directory and vault homes are `0700` and vault files `0600` (Unix);
+//!   looser permissions are logged as a warning and the vault still opens.
 //! - All statements are parameterized.
 //!
 //! ```
@@ -62,8 +64,9 @@ const SCHEMA: &str = "CREATE TABLE vault (
     body     BLOB    NOT NULL
 ) STRICT;";
 
-/// File extension of vault files.
-const EXTENSION: &str = "vault";
+/// Name of the vault file inside a vault home (ADR-0009). Fixed, so the vault home's
+/// name is the only place the vaultname lives.
+const VAULT_FILE: &str = "secrets.vault";
 
 /// How long a save waits for another session's write to finish before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -225,17 +228,52 @@ impl SqliteStore {
         Ok(Self { dir })
     }
 
-    /// The path of `name`'s vault file. The only place a path is built from a vaultname.
+    /// The path of `name`'s vault home. The only place a path is built from a vaultname.
     ///
     /// ```ignore
-    /// assert!(store.path(&alice).ends_with("alice.vault"));
+    /// assert!(store.home(&alice).ends_with("alice"));
     /// ```
-    fn path(&self, name: &Vaultname) -> PathBuf {
-        self.dir.join(format!("{name}.{EXTENSION}"))
+    fn home(&self, name: &Vaultname) -> PathBuf {
+        self.dir.join(name.as_str())
     }
 
-    /// Opens `name`'s existing vault file as a hardened connection, after checking it is
-    /// a regular file holding a vault schema this build knows.
+    /// The path of `name`'s vault file, inside its vault home.
+    ///
+    /// ```ignore
+    /// assert!(store.path(&alice).ends_with("alice/secrets.vault"));
+    /// ```
+    fn path(&self, name: &Vaultname) -> PathBuf {
+        self.home(name).join(VAULT_FILE)
+    }
+
+    /// Checks that `name`'s vault home is a real directory, not a symlink or a file;
+    /// [`StorageError::NotFound`] if it doesn't exist.
+    ///
+    /// Security: a symlinked vault home could point one vaultname at another vault or
+    /// outside the vault directory, so it is refused as [`StorageError::NotAVault`].
+    /// Group- or world-writable permissions are logged as a warning, not refused.
+    ///
+    /// ```ignore
+    /// self.check_home(&alice)?;
+    /// ```
+    fn check_home(&self, name: &Vaultname) -> Result<(), StorageError> {
+        let metadata = match fs::symlink_metadata(self.home(name)) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(StorageError::NotFound);
+            }
+            result => result.map_err(io_error)?,
+        };
+        if !metadata.is_dir() {
+            return Err(StorageError::NotAVault);
+        }
+        if is_loosely_permitted(&metadata) {
+            tracing::warn!(event = "vault_home_permissions_loose", vaultname = %name);
+        }
+        Ok(())
+    }
+
+    /// Opens `name`'s existing vault file as a hardened connection, after checking its
+    /// vault home and that it is a regular file holding a vault schema this build knows.
     ///
     /// Security: symlinks and directories are refused as [`StorageError::NotAVault`];
     /// SQLite's own defences are on before it reads the file.
@@ -244,6 +282,7 @@ impl SqliteStore {
     /// let conn = self.open_existing(&alice)?;
     /// ```
     fn open_existing(&self, name: &Vaultname) -> Result<Connection, StorageError> {
+        self.check_home(name)?;
         let path = self.path(name);
         let metadata = match fs::symlink_metadata(&path) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -265,9 +304,10 @@ impl SqliteStore {
 }
 
 impl VaultStore for SqliteStore {
-    /// Builds the vault in a private temp file in the vault directory, then hard-links
-    /// it to its final name, which fails if the name is taken. A crash leaves at most a
-    /// stray temp file, never a half-made vault under `name`.
+    /// Creates the vault home, builds the vault in a private temp file inside it, then
+    /// hard-links it to `secrets.vault`, which fails if a vault is already there. A crash
+    /// leaves at most an empty vault home or a stray temp file, never a half-made vault
+    /// under `name`; a later `create` takes such a vault home over (ADR-0009).
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
@@ -276,16 +316,19 @@ impl VaultStore for SqliteStore {
     /// # let store = SqliteStore::new(dir.path())?;
     /// # let (_, sealed) = crypto::create_insecure_for_tests(&MasterPassword::new("pw".into()), &Plaintext::new(vec![]))?;
     /// store.create(&Vaultname::parse("alice")?, &sealed)?;
-    /// assert!(dir.path().join("alice.vault").is_file());
+    /// assert!(dir.path().join("alice/secrets.vault").is_file());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn create(&self, name: &Vaultname, sealed: &SealedVault) -> Result<(), StorageError> {
         let revision = sql_revision(sealed.header.revision()).ok_or(StorageError::Io)?;
+        let home = self.home(name);
+        create_vault_home(&home).map_err(io_error)?;
+        self.check_home(name)?;
         // `tempfile` creates the file 0600 on Unix.
         let temp = tempfile::Builder::new()
             .prefix(".")
-            .suffix(&format!(".{EXTENSION}.tmp"))
-            .tempfile_in(&self.dir)
+            .suffix(".tmp")
+            .tempfile_in(&home)
             .map_err(io_error)?;
 
         let mut conn = open_hardened(temp.path())?;
@@ -311,6 +354,7 @@ impl VaultStore for SqliteStore {
                 StorageError::Io
             }
         })?;
+        sync_dir(&home).map_err(io_error)?;
         sync_dir(&self.dir).map_err(io_error)
         // Dropping `temp` removes the temp name; the vault keeps its final one.
     }
@@ -384,9 +428,9 @@ impl VaultStore for SqliteStore {
     }
 }
 
-/// Opens `path` as an existing SQLite file (never creating it) with the defences for
-/// untrusted files on before the first read: defensive mode, untrusted schema, no URI
-/// parsing.
+/// Opens `path` as an existing SQLite file (never creating it, never following a
+/// symlink) with the defences for untrusted files on before the first read: defensive
+/// mode, untrusted schema, no URI parsing.
 ///
 /// ```ignore
 /// let conn = open_hardened(&path)?;
@@ -394,7 +438,9 @@ impl VaultStore for SqliteStore {
 fn open_hardened(path: &Path) -> Result<Connection, StorageError> {
     let conn = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(sqlite_error)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
@@ -497,11 +543,33 @@ fn io_error(_: io::Error) -> StorageError {
 /// create_private_dir(Path::new("/home/alice/.local/share/secure-pass-manager/vaults"))?;
 /// ```
 fn create_private_dir(dir: &Path) -> io::Result<()> {
+    private_dir_builder().recursive(true).create(dir)
+}
+
+/// A directory builder that creates directories `0700` on Unix: the one place that
+/// mode is set.
+///
+/// ```ignore
+/// private_dir_builder().create(home)?;
+/// ```
+fn private_dir_builder() -> fs::DirBuilder {
     let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)
+    builder
+}
+
+/// Creates the vault home `home`, `0700` on Unix. One left behind by an interrupted
+/// `create` is reused; the hard link to `secrets.vault` still refuses a taken vaultname.
+///
+/// ```ignore
+/// create_vault_home(&store.home(&alice))?;
+/// ```
+fn create_vault_home(home: &Path) -> io::Result<()> {
+    match private_dir_builder().create(home) {
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        result => result,
+    }
 }
 
 /// Whether other users may write to this file or directory (group- or world-writable).

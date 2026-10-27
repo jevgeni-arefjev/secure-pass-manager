@@ -3,7 +3,7 @@
 //! Every test gets its own temporary vault directory. Vaults are sealed in the test
 //! format (`create_insecure_for_tests`) so each Argon2id derivation stays fast.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use vault_core::crypto::{self, MasterPassword, Plaintext, SealedVault, VaultKey};
@@ -56,13 +56,47 @@ fn next(key: &VaultKey, sealed: &SealedVault, body: &str) -> SealedVault {
     .unwrap()
 }
 
-/// Where the store keeps `vaultname`'s file inside the temp dir from [`store`].
+/// Where the store keeps `vaultname`'s vault home inside the temp dir from [`store`].
+///
+/// ```text
+/// let home = vault_home(&dir, "alice");
+/// ```
+fn vault_home(dir: &TempDir, vaultname: &str) -> PathBuf {
+    dir.path().join("vaults").join(vaultname)
+}
+
+/// Where the store keeps `vaultname`'s vault file inside the temp dir from [`store`].
 ///
 /// ```text
 /// let path = vault_path(&dir, "alice");
 /// ```
-fn vault_path(dir: &TempDir, vaultname: &str) -> std::path::PathBuf {
-    dir.path().join("vaults").join(format!("{vaultname}.vault"))
+fn vault_path(dir: &TempDir, vaultname: &str) -> PathBuf {
+    vault_home(dir, vaultname).join("secrets.vault")
+}
+
+/// Creates `vaultname`'s vault home by hand (panicking if it exists) and returns its
+/// vault file path, for tests that plant their own file there.
+///
+/// ```text
+/// std::fs::write(make_vault_home(&dir, "alice"), b"junk")?;
+/// ```
+fn make_vault_home(dir: &TempDir, vaultname: &str) -> PathBuf {
+    std::fs::create_dir(vault_home(dir, vaultname)).unwrap();
+    vault_path(dir, vaultname)
+}
+
+/// The names of the entries directly inside `path`, sorted.
+///
+/// ```text
+/// assert_eq!(dir_listing(&vault_home(&dir, "alice")), ["secrets.vault"]);
+/// ```
+fn dir_listing(path: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
 }
 
 /// Whether `needle` occurs anywhere in the file at `path`.
@@ -164,15 +198,12 @@ fn create_refuses_an_existing_vaultname() {
 }
 
 #[test]
-fn create_leaves_no_temp_files_behind() {
+fn create_puts_the_vault_file_in_its_vault_home_and_leaves_no_temp_files() {
     let (dir, store) = store();
     store.create(&name("alice"), &new_vault("[]").1).unwrap();
 
-    let files: Vec<_> = std::fs::read_dir(dir.path().join("vaults"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(files, ["alice.vault"]);
+    assert_eq!(dir_listing(&dir.path().join("vaults")), ["alice"]);
+    assert_eq!(dir_listing(&vault_home(&dir, "alice")), ["secrets.vault"]);
 }
 
 #[test]
@@ -253,12 +284,12 @@ fn saved_vault_no_longer_contains_the_old_ciphertext() {
 }
 
 #[test]
-fn renamed_vault_file_loads_under_its_new_vaultname() {
+fn renamed_vault_home_loads_under_its_new_vaultname() {
     let (dir, store) = store();
     let (_, v0) = new_vault("[]");
     store.create(&name("alice"), &v0).unwrap();
 
-    std::fs::rename(vault_path(&dir, "alice"), vault_path(&dir, "bob")).unwrap();
+    std::fs::rename(vault_home(&dir, "alice"), vault_home(&dir, "bob")).unwrap();
 
     assert_eq!(store.load(&name("bob")).unwrap(), v0);
 }
@@ -268,7 +299,7 @@ fn renamed_vault_file_loads_under_its_new_vaultname() {
 #[test]
 fn random_bytes_are_not_a_vault() {
     let (dir, store) = store();
-    std::fs::write(vault_path(&dir, "alice"), vec![0x5a; 8192]).unwrap();
+    std::fs::write(make_vault_home(&dir, "alice"), vec![0x5a; 8192]).unwrap();
 
     assert_eq!(
         store.load(&name("alice")).err(),
@@ -279,7 +310,7 @@ fn random_bytes_are_not_a_vault() {
 #[test]
 fn empty_file_is_not_a_vault() {
     let (dir, store) = store();
-    std::fs::write(vault_path(&dir, "alice"), []).unwrap();
+    std::fs::write(make_vault_home(&dir, "alice"), []).unwrap();
 
     assert_eq!(
         store.load(&name("alice")).err(),
@@ -290,7 +321,7 @@ fn empty_file_is_not_a_vault() {
 #[test]
 fn other_sqlite_database_is_not_a_vault() {
     let (dir, store) = store();
-    let conn = rusqlite::Connection::open(vault_path(&dir, "alice")).unwrap();
+    let conn = rusqlite::Connection::open(make_vault_home(&dir, "alice")).unwrap();
     conn.execute_batch(
         "CREATE TABLE vault (id INTEGER, revision INTEGER, header BLOB, body BLOB);",
     )
@@ -351,12 +382,63 @@ fn malformed_header_is_not_a_vault() {
 #[test]
 fn directory_in_place_of_a_vault_file_is_not_a_vault() {
     let (dir, store) = store();
-    std::fs::create_dir(vault_path(&dir, "alice")).unwrap();
+    std::fs::create_dir_all(vault_path(&dir, "alice")).unwrap();
 
     assert_eq!(
         store.load(&name("alice")).err(),
         Some(StorageError::NotAVault)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_vault_home_is_not_a_vault() {
+    let (dir, store) = store();
+    let (_, v0) = new_vault("[]");
+    store.create(&name("alice"), &v0).unwrap();
+    std::os::unix::fs::symlink(vault_home(&dir, "alice"), vault_home(&dir, "bob")).unwrap();
+
+    assert_eq!(
+        store.load(&name("bob")).err(),
+        Some(StorageError::NotAVault)
+    );
+    assert_eq!(
+        store.create(&name("bob"), &new_vault("[]").1).err(),
+        Some(StorageError::NotAVault)
+    );
+    assert_eq!(dir_listing(&vault_home(&dir, "alice")), ["secrets.vault"]);
+}
+
+#[test]
+fn file_in_place_of_a_vault_home_is_not_a_vault() {
+    let (dir, store) = store();
+    std::fs::write(vault_home(&dir, "alice"), b"not a directory").unwrap();
+
+    assert_eq!(
+        store.load(&name("alice")).err(),
+        Some(StorageError::NotAVault)
+    );
+    assert_eq!(
+        store.create(&name("alice"), &new_vault("[]").1).err(),
+        Some(StorageError::NotAVault)
+    );
+}
+
+// --- Interrupted init ---
+
+#[test]
+fn empty_vault_home_is_not_found_and_create_takes_it_over() {
+    let (dir, store) = store();
+    std::fs::create_dir(vault_home(&dir, "alice")).unwrap();
+
+    assert_eq!(
+        store.load(&name("alice")).err(),
+        Some(StorageError::NotFound)
+    );
+
+    let (_, v0) = new_vault("[]");
+    store.create(&name("alice"), &v0).unwrap();
+    assert_eq!(store.load(&name("alice")).unwrap(), v0);
 }
 
 // --- Errors ---
@@ -391,6 +473,14 @@ mod permissions {
     fn vault_directory_is_private_to_its_owner() {
         let (dir, _store) = store();
         assert_eq!(mode(&dir.path().join("vaults")), 0o700);
+    }
+
+    #[test]
+    fn vault_home_is_private_to_its_owner() {
+        let (dir, store) = store();
+        store.create(&name("alice"), &new_vault("[]").1).unwrap();
+
+        assert_eq!(mode(&vault_home(&dir, "alice")), 0o700);
     }
 
     #[test]

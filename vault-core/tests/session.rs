@@ -178,7 +178,7 @@ impl Fixture {
     /// let bytes = fx.vault_file_bytes();
     /// ```
     fn vault_file_bytes(&self) -> Vec<u8> {
-        std::fs::read(self.dir.path().join("vaults/alice.vault")).unwrap()
+        std::fs::read(self.dir.path().join("vaults/alice/secrets.vault")).unwrap()
     }
 }
 
@@ -572,7 +572,7 @@ fn failed_write_leaves_secrets_unchanged() {
     let fx = Fixture::new();
     let mut session = fx.create();
     session.save(Secret::new("GitHub")).unwrap();
-    std::fs::remove_file(fx.dir.path().join("vaults/alice.vault")).unwrap();
+    std::fs::remove_file(fx.dir.path().join("vaults/alice/secrets.vault")).unwrap();
 
     assert_eq!(
         session.save(Secret::new("gitlab")),
