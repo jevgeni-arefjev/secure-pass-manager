@@ -332,6 +332,23 @@ fn save_keeps_a_lock_file_and_leaves_no_temp_files() {
     );
 }
 
+#[test]
+fn save_removes_temp_files_left_by_an_interrupted_save() {
+    let (dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+    let home = vault_home(&dir, "alice");
+    std::fs::write(home.join(".interrupted.tmp"), &v0.body).unwrap();
+    std::fs::write(home.join("notes.txt"), b"not ours to delete").unwrap();
+
+    store.save(&name("alice"), &next(&key, &v0, "v1")).unwrap();
+
+    assert_eq!(
+        dir_listing(&home),
+        ["notes.txt", "secrets.lock", "secrets.vault"]
+    );
+}
+
 // --- Concurrent sessions ---
 
 #[test]
@@ -437,6 +454,29 @@ fn sqlite_database_is_not_a_vault() {
 
     assert_eq!(
         store.load(&name("alice")).err(),
+        Some(StorageError::NotAVault)
+    );
+}
+
+#[test]
+fn file_over_the_size_limit_is_not_a_vault() {
+    let (dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+    // Sparse, so the test doesn't write 64 MiB.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(vault_path(&dir, "alice"))
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+
+    assert_eq!(
+        store.load(&name("alice")).err(),
+        Some(StorageError::NotAVault)
+    );
+    assert_eq!(
+        store.save(&name("alice"), &next(&key, &v0, "v1")).err(),
         Some(StorageError::NotAVault)
     );
 }

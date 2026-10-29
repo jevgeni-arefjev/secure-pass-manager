@@ -12,7 +12,9 @@
 //!   strict [`Header::decode`]; there is no query language to inject into.
 //! - Every write goes to a temp file that is fsynced, then renamed (or, on create,
 //!   hard-linked) into place, so a crash leaves the old vault or the new one, never a
-//!   mix, and the vault file never keeps old ciphertext.
+//!   mix, and the vault file never keeps old ciphertext. Temp files a crash leaves
+//!   behind are removed by the next save.
+//! - A vault file over 64 MiB is refused before it is read, so it can't exhaust memory.
 //! - A save holds an exclusive lock on `secrets.lock` and only succeeds if the stored
 //!   revision is the one the new revision follows, so two sessions can't silently
 //!   overwrite each other.
@@ -58,6 +60,14 @@ const VAULT_FILE: &str = "secrets.vault";
 /// vault file (ADR-0011). The vault file itself can't be locked: the rename replaces it.
 const LOCK_FILE: &str = "secrets.lock";
 
+/// Largest vault file storage reads, in bytes. Far above any real vault (a few KiB); it
+/// only stops a planted or corrupted file from exhausting memory.
+const MAX_VAULT_FILE_LEN: u64 = 64 * 1024 * 1024;
+
+/// Prefix and suffix of the temp files a write builds a vault in (`.<random>.tmp`).
+const TEMP_PREFIX: &str = ".";
+const TEMP_SUFFIX: &str = ".tmp";
+
 /// How long a save waits for another session's save to finish before failing.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -83,7 +93,8 @@ pub enum StorageError {
     /// The save doesn't follow the stored revision: another session saved first.
     Conflict,
     /// The file isn't a vault file this build can read: not a regular file, shorter
-    /// than a header, or a header with the wrong magic or an unknown format version.
+    /// than a header, over the size limit, or a header with the wrong magic or an
+    /// unknown format version.
     NotAVault,
     /// The file system failed, or another session held the lock for too long.
     Io,
@@ -267,28 +278,72 @@ impl FileStore {
         }
     }
 
-    /// Reads and parses `name`'s vault file, after [`Self::check_vault_file`].
+    /// Opens `name`'s vault file for reading, after [`Self::check_vault_file`] has
+    /// passed. Call it while holding the lock if what is read decides a save.
     ///
     /// Security: opened with `O_NOFOLLOW` and checked again on the opened file, so it
-    /// can't be swapped for a symlink or special file between check and read.
+    /// can't be swapped for a symlink or special file between check and read. A file
+    /// over [`MAX_VAULT_FILE_LEN`] is refused as [`StorageError::NotAVault`].
+    ///
+    /// ```ignore
+    /// self.check_vault_file(&alice)?;
+    /// let file = self.open_vault_file(&alice)?;
+    /// ```
+    fn open_vault_file(&self, name: &Vaultname) -> Result<File, StorageError> {
+        let file = match open_no_follow(OpenOptions::new().read(true), &self.path(name)) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(StorageError::NotFound);
+            }
+            result => result.map_err(io_error)?,
+        };
+        let metadata = file.metadata().map_err(io_error)?;
+        if !metadata.is_file() || metadata.len() > MAX_VAULT_FILE_LEN {
+            return Err(StorageError::NotAVault);
+        }
+        if is_loosely_permitted(&metadata) {
+            tracing::warn!(event = "vault_file_permissions_loose", vaultname = %name);
+        }
+        Ok(file)
+    }
+
+    /// Reads and parses `name`'s whole vault file.
     ///
     /// ```ignore
     /// let sealed = self.read_vault(&alice)?;
     /// ```
     fn read_vault(&self, name: &Vaultname) -> Result<SealedVault, StorageError> {
         self.check_vault_file(name)?;
-        let mut file =
-            open_no_follow(OpenOptions::new().read(true), &self.path(name)).map_err(io_error)?;
-        let metadata = file.metadata().map_err(io_error)?;
-        if !metadata.is_file() {
+        let file = self.open_vault_file(name)?;
+        let mut bytes = Vec::new();
+        // The bound also covers a file that grows after its length was checked.
+        file.take(MAX_VAULT_FILE_LEN + 1)
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        if bytes.len() as u64 > MAX_VAULT_FILE_LEN {
             return Err(StorageError::NotAVault);
         }
-        if is_loosely_permitted(&metadata) {
-            tracing::warn!(event = "vault_file_permissions_loose", vaultname = %name);
-        }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io_error)?;
         decode_vault(bytes)
+    }
+
+    /// The revision of the vault stored under `name`, read from its header alone. Used
+    /// by a save, under the lock, after [`Self::check_vault_file`].
+    ///
+    /// ```ignore
+    /// let stored = self.read_revision(&alice)?;
+    /// ```
+    fn read_revision(&self, name: &Vaultname) -> Result<u64, StorageError> {
+        let mut file = self.open_vault_file(name)?;
+        let mut header = [0; Header::LEN];
+        file.read_exact(&mut header).map_err(|err| {
+            if err.kind() == io::ErrorKind::UnexpectedEof {
+                StorageError::NotAVault
+            } else {
+                StorageError::Io
+            }
+        })?;
+        Header::decode(&header)
+            .map(|header| header.revision())
+            .map_err(|_| StorageError::NotAVault)
     }
 }
 
@@ -320,8 +375,10 @@ impl VaultStore for FileStore {
                 StorageError::Io
             }
         })?;
-        sync_dir(&home).map_err(io_error)?;
-        sync_dir(&self.dir).map_err(io_error)
+        // The vault now exists: from here on, failing would misreport what happened.
+        sync_dir_after_commit(&home);
+        sync_dir_after_commit(&self.dir);
+        Ok(())
         // Dropping `temp` removes the temp name; the vault keeps its final one.
     }
 
@@ -342,8 +399,11 @@ impl VaultStore for FileStore {
         self.read_vault(name)
     }
 
-    /// Under the vault home's lock: reads the stored revision, checks `sealed` follows
-    /// it, then writes `sealed` to a temp file and renames it over `secrets.vault`.
+    /// Under the vault home's lock: reads the stored revision from its header, checks
+    /// `sealed` follows it, removes temp files left by interrupted writes, then writes
+    /// `sealed` to a temp file and renames it over `secrets.vault`. Once the rename is
+    /// done the save has happened and returns `Ok`, even if the directory fsync after it
+    /// fails (logged as a warning).
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
@@ -362,14 +422,16 @@ impl VaultStore for FileStore {
         self.check_vault_file(name)?;
         let home = self.home(name);
         let _lock = lock_vault_home(&home)?;
-        let stored = self.read_vault(name)?.header.revision();
+        let stored = self.read_revision(name)?;
         if sealed.header.revision().checked_sub(1) != Some(stored) {
             return Err(StorageError::Conflict);
         }
+        remove_stale_temps(&home);
         let temp = write_temp(&home, sealed).map_err(io_error)?;
         temp.persist(self.path(name))
             .map_err(|err| io_error(err.error))?;
-        sync_dir(&home).map_err(io_error)
+        sync_dir_after_commit(&home);
+        Ok(())
     }
 }
 
@@ -440,13 +502,45 @@ fn decode_vault(mut bytes: Vec<u8>) -> Result<SealedVault, StorageError> {
 /// ```
 fn write_temp(home: &Path, sealed: &SealedVault) -> io::Result<NamedTempFile> {
     let mut temp = tempfile::Builder::new()
-        .prefix(".")
-        .suffix(".tmp")
+        .prefix(TEMP_PREFIX)
+        .suffix(TEMP_SUFFIX)
         .tempfile_in(home)?;
     temp.write_all(&sealed.header.encode())?;
     temp.write_all(&sealed.body)?;
     temp.as_file().sync_all()?;
     Ok(temp)
+}
+
+/// Removes the temp files (`.<random>.tmp`) a crashed write left in the vault home
+/// `home`. Best effort: a file that can't be removed is logged and left for next time.
+/// Call it only while holding the lock, so no other save's temp file is in flight.
+///
+/// Security: a leftover temp file holds a whole sealed vault, possibly with a header
+/// wrapped under a since-rotated master password. Only regular files are removed; a
+/// symlink of that name is left alone.
+///
+/// ```ignore
+/// let _lock = lock_vault_home(&home)?;
+/// remove_stale_temps(&home);
+/// ```
+fn remove_stale_temps(home: &Path) {
+    let Ok(entries) = fs::read_dir(home) else {
+        tracing::warn!(event = "vault_temp_cleanup_failed");
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let is_temp = file_name.len() > TEMP_PREFIX.len() + TEMP_SUFFIX.len()
+            && file_name.starts_with(TEMP_PREFIX)
+            && file_name.ends_with(TEMP_SUFFIX);
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if is_temp && is_file && fs::remove_file(entry.path()).is_err() {
+            tracing::warn!(event = "vault_temp_cleanup_failed");
+        }
+    }
 }
 
 /// Takes the exclusive lock on the vault home's `secrets.lock`, creating the file if
@@ -481,12 +575,12 @@ fn lock_vault_home(home: &Path) -> Result<File, StorageError> {
 }
 
 /// Opens `path` with `options`, never following a symlink (`O_NOFOLLOW` on Unix; a
-/// plain open elsewhere).
+/// plain open elsewhere). The one place that flag is set; the audit log uses it too.
 ///
 /// ```ignore
 /// let file = open_no_follow(OpenOptions::new().read(true), &path)?;
 /// ```
-fn open_no_follow(options: &OpenOptions, path: &Path) -> io::Result<File> {
+pub(crate) fn open_no_follow(options: &OpenOptions, path: &Path) -> io::Result<File> {
     let mut options = options.clone();
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
@@ -570,4 +664,18 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(not(unix))]
     let _ = dir;
     Ok(())
+}
+
+/// Fsyncs the directory `dir` after a vault file was linked or renamed into it. The
+/// change has already happened, so a failure is logged as a warning, not returned: an
+/// error would make the session undo a change that is on disk.
+///
+/// ```ignore
+/// temp.persist(path)?;
+/// sync_dir_after_commit(&home);
+/// ```
+fn sync_dir_after_commit(dir: &Path) {
+    if sync_dir(dir).is_err() {
+        tracing::warn!(event = "vault_directory_sync_failed");
+    }
 }

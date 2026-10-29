@@ -351,10 +351,7 @@ impl From<LogOpenError> for AuditError {
 /// let file = open_log(OpenOptions::new().read(true), &home.join(LOG_FILE), name)?;
 /// ```
 fn open_log(options: &OpenOptions, path: &Path, name: &Vaultname) -> Result<File, LogOpenError> {
-    let mut options = options.clone();
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
-    let file = match options.open(path) {
+    let file = match storage::open_no_follow(options, path) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(LogOpenError::NotFound),
         result => result.map_err(|_| LogOpenError::Refused)?,
     };
