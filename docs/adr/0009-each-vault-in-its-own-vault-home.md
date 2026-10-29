@@ -10,9 +10,10 @@ Amends ADR-0001 and ADR-0004. Each vault gets its own directory inside the vault
 
 ## Consequences
 
-- `init` creates the vault home (mode `0700`), or reuses an existing one, builds the vault in a temp file inside it and hard-links it to `secrets.vault`, as before (ADR-0006). The hard link is what claims the vaultname: it fails if `secrets.vault` already exists.
+- `init` creates the vault home (mode `0700`), or reuses an existing one, builds the vault in a temp file inside it and hard-links it to `secrets.vault`, as before (ADR-0006, ADR-0011). The hard link is what claims the vaultname: it fails if `secrets.vault` already exists.
 - A vault home without `secrets.vault`, left by an interrupted `init`, is not a vault: unlock fails exactly as for an unknown vaultname, and a later `init` with that vaultname takes it over. Two concurrent `init`s stay safe, because the hard link refuses an existing target.
 - A vault home that is a symlink is refused; loose permissions on it draw the same warning as on the vault directory.
 - The vaultname allowlist (ADR-0001) still guards the path; the vaultname is now a directory name instead of a file name.
+- Saves also keep an empty lock file `secrets.lock` in the vault home (ADR-0011). It holds nothing and may be deleted while no session is saving.
 - Restoring a backup by hand means creating a vault home and putting the backup in it as `secrets.vault`.
 - Vaults in the old flat layout (`<vaultname>.vault` at the top of the vault directory) are ignored. There is no migration.

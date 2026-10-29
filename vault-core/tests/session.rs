@@ -15,7 +15,7 @@ use vault_core::session::{
     Clock, CustomField, DEFAULT_IDLE_TIMEOUT, FieldValue, HiddenValue, InvalidSecret, Saved,
     Secret, Session, SessionConfig, SessionError, WeakMasterPassword,
 };
-use vault_core::storage::{SqliteStore, Vaultname};
+use vault_core::storage::{FileStore, Vaultname};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -115,8 +115,8 @@ impl Fixture {
     /// ```text
     /// let store = fx.store();
     /// ```
-    fn store(&self) -> SqliteStore {
-        SqliteStore::new(self.dir.path().join("vaults")).unwrap()
+    fn store(&self) -> FileStore {
+        FileStore::new(self.dir.path().join("vaults")).unwrap()
     }
 
     /// A config on this fixture's clock and audit log, with the default idle timeout.
@@ -166,7 +166,7 @@ impl Fixture {
     /// ```text
     /// let mut session = fx.create();
     /// ```
-    fn create(&self) -> Session<SqliteStore> {
+    fn create(&self) -> Session<FileStore> {
         self.try_create("alice", PASSWORD).unwrap()
     }
 
@@ -179,7 +179,7 @@ impl Fixture {
         &self,
         vaultname: &str,
         password: &str,
-    ) -> Result<Session<SqliteStore>, SessionError> {
+    ) -> Result<Session<FileStore>, SessionError> {
         Session::create_insecure_for_tests(
             self.store(),
             vaultname,
@@ -193,11 +193,7 @@ impl Fixture {
     /// ```text
     /// let mut session = fx.unlock("alice", PASSWORD).unwrap();
     /// ```
-    fn unlock(
-        &self,
-        vaultname: &str,
-        password: &str,
-    ) -> Result<Session<SqliteStore>, SessionError> {
+    fn unlock(&self, vaultname: &str, password: &str) -> Result<Session<FileStore>, SessionError> {
         Session::unlock(
             self.store(),
             vaultname,
@@ -690,10 +686,10 @@ fn sessions_can_move_between_threads() {
     /// Compiles only if `T` is `Send`, as the web server will need for its sessions.
     ///
     /// ```text
-    /// assert_send::<Session<SqliteStore>>();
+    /// assert_send::<Session<FileStore>>();
     /// ```
     fn assert_send<T: Send>() {}
-    assert_send::<Session<SqliteStore>>();
+    assert_send::<Session<FileStore>>();
 }
 
 // ---- Audit events (ADR-0010) ----

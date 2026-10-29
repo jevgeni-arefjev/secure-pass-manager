@@ -17,7 +17,7 @@ use vault_cli::terminal::{Terminal, TerminalError, TerminalHandle};
 use vault_core::audit::FileSink;
 use vault_core::crypto::MasterPassword;
 use vault_core::session::{Clock, HiddenValue, Session, SessionConfig};
-use vault_core::storage::SqliteStore;
+use vault_core::storage::FileStore;
 use zeroize::Zeroizing;
 
 const PASSWORD: &str = "correct horse battery";
@@ -251,7 +251,7 @@ impl Fixture {
     /// ```
     fn with_alice() -> Self {
         let fx = Self::new();
-        let store = SqliteStore::new(fx.dir.path()).unwrap();
+        let store = FileStore::new(fx.dir.path()).unwrap();
         let password = MasterPassword::new(PASSWORD.to_owned());
         let config = SessionConfig::new(Arc::new(FileSink::new(fx.dir.path())));
         Session::create_insecure_for_tests(store, "alice", &password, config)

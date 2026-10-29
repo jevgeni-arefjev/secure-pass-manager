@@ -19,7 +19,7 @@ This app consists off:
 ```mermaid
 flowchart LR
   TS["TypeScript client (browser)"] -->|"HTTPS + session cookie + CSRF token"| SRV["vault-web: TLS, session, authz"]
-  SRV --> SE[Session] --> ENC[Encryption] --> ST[(Storage / SQL)]
+  SRV --> SE[Session] --> ENC[Encryption] --> ST[(Storage / vault file)]
   SRV -->|"masked secrets; one hidden field per request"| TS
 ```
 
@@ -48,7 +48,7 @@ Server holds an unwrapped key for the life of a session. Made for convenience, o
 
 - CSRF - per-session token on every state-changing request, `SameSite` and origin check
 
-SQL is not in the web layer, all statements parameterized in the core.
+There is no SQL anywhere: vaults are flat files (ADR-0011), so there is no query to inject into.
 
 ## 4. Threat model
 
@@ -70,7 +70,7 @@ Master-password, vault-at-rest and vault-in-memory analysis in `secure-password-
 | Session | Session left unattended | Auto-lock in 5 min, clear browser cache |
 | Access control | Request naming another user's secret | Vault resolved from the session only; the server opens only that vault file, so other users' secrets are unreachable; unknown secret returns 404 |
 | Injection | Vaultname used as a vault file name (path traversal) | Vaultnames allowlisted (restricted charset and length); vault path built only inside the vault directory |
-| Injection | Malicious input reaching a query or rendered as markup | Parameterized statements; validation, no inline scripts |
+| Injection | Malicious input reaching a query or rendered as markup | No query language (flat vault files, ADR-0011); validation, no inline scripts |
 
 ### OWASP Top 10 2025
 
@@ -83,7 +83,7 @@ Master-password, vault-at-rest and vault-in-memory analysis in `secure-password-
 | A05 Injection | Secret fields are escaped as text, never set with innerHTML; URL schemes allowlisted; CSP as backup |
 | A06 Insecure Design |	:) |
 | A07 Authentication Failures |	Generic unlock error with constant delay, whether or not the vaultname exists; tokens in memory only, rotated; server-side idle timeout. |
-| A08 Software or Data Integrity Failures |	Authenticated header blocks tampering, each save is one SQLite transaction that fails on a revision conflict. Rollback to an older vault copy is not detected (accepted, see `secure-password-manager.md` threat model). |
+| A08 Software or Data Integrity Failures |	Authenticated header blocks tampering, each save atomically replaces the vault file under a lock and fails on a revision conflict. Rollback to an older vault copy is not detected (accepted, see `secure-password-manager.md` threat model). |
 | A09 Security Logging and Alerting Failures | Audit log module in `secure-password-manager.md` |
 | A10 Mishandling of Exceptional Conditions	| Panic on any error; locks the vault with a generic 401 error |
 

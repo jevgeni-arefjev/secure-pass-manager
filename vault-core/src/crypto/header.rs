@@ -121,6 +121,18 @@ pub struct Header {
 }
 
 impl Header {
+    /// Length of every encoded header, in bytes. Storage reads exactly this much before
+    /// the body (ADR-0011).
+    ///
+    /// ```
+    /// # use vault_core::crypto::{self, MasterPassword, Plaintext, Header};
+    /// # let password = MasterPassword::new("hunter2".into());
+    /// # let (_, sealed) = crypto::create_insecure_for_tests(&password, &Plaintext::new(vec![]))?;
+    /// assert_eq!(sealed.header.encode().len(), Header::LEN);
+    /// # Ok::<(), crypto::CryptoError>(())
+    /// ```
+    pub const LEN: usize = WRAP_AAD_LEN + NONCE_LEN + WRAPPED_KEY_LEN + 8 + NONCE_LEN;
+
     /// The save counter: 0 at creation, +1 on every save. Orders backups and writes;
     /// it is not rollback protection.
     ///

@@ -4,19 +4,21 @@
 //! format (`create_insecure_for_tests`) so each Argon2id derivation stays fast.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 use tempfile::TempDir;
 use vault_core::crypto::{self, MasterPassword, Plaintext, SealedVault, VaultKey};
-use vault_core::storage::{SqliteStore, StorageError, VaultStore, Vaultname};
+use vault_core::storage::{FileStore, StorageError, VaultStore, Vaultname};
 
 /// A store in a fresh temporary vault directory; keep the `TempDir` alive for the test.
 ///
 /// ```text
 /// let (_dir, store) = store();
 /// ```
-fn store() -> (TempDir, SqliteStore) {
+fn store() -> (TempDir, FileStore) {
     let dir = TempDir::new().unwrap();
-    let store = SqliteStore::new(dir.path().join("vaults")).unwrap();
+    let store = FileStore::new(dir.path().join("vaults")).unwrap();
     (dir, store)
 }
 
@@ -72,6 +74,15 @@ fn vault_home(dir: &TempDir, vaultname: &str) -> PathBuf {
 /// ```
 fn vault_path(dir: &TempDir, vaultname: &str) -> PathBuf {
     vault_home(dir, vaultname).join("secrets.vault")
+}
+
+/// Where the store keeps `vaultname`'s lock file inside the temp dir from [`store`].
+///
+/// ```text
+/// let lock = lock_path(&dir, "alice");
+/// ```
+fn lock_path(dir: &TempDir, vaultname: &str) -> PathBuf {
+    vault_home(dir, vaultname).join("secrets.lock")
 }
 
 /// Creates `vaultname`'s vault home by hand (panicking if it exists) and returns its
@@ -270,8 +281,8 @@ fn skipping_a_revision_is_a_conflict() {
 #[test]
 fn saved_vault_no_longer_contains_the_old_ciphertext() {
     let (dir, store) = store();
-    // A large body followed by a small one, so freed pages are left over instead of
-    // being reused (and overwritten) by the new body.
+    // A large body followed by a small one, so an in-place write would leave the old
+    // body's tail behind.
     let (key, v0) = new_vault(&"x".repeat(20_000));
     store.create(&name("alice"), &v0).unwrap();
 
@@ -292,6 +303,105 @@ fn renamed_vault_home_loads_under_its_new_vaultname() {
     std::fs::rename(vault_home(&dir, "alice"), vault_home(&dir, "bob")).unwrap();
 
     assert_eq!(store.load(&name("bob")).unwrap(), v0);
+}
+
+#[test]
+fn vault_file_is_the_header_followed_by_the_body() {
+    let (dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+    let v1 = next(&key, &v0, "v1");
+    store.save(&name("alice"), &v1).unwrap();
+
+    let mut expected = v1.header.encode();
+    expected.extend_from_slice(&v1.body);
+    assert_eq!(std::fs::read(vault_path(&dir, "alice")).unwrap(), expected);
+}
+
+#[test]
+fn save_keeps_a_lock_file_and_leaves_no_temp_files() {
+    let (dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+
+    store.save(&name("alice"), &next(&key, &v0, "v1")).unwrap();
+
+    assert_eq!(
+        dir_listing(&vault_home(&dir, "alice")),
+        ["secrets.lock", "secrets.vault"]
+    );
+}
+
+// --- Concurrent sessions ---
+
+#[test]
+fn stale_save_from_another_store_is_a_conflict() {
+    let (dir, first) = store();
+    let second = FileStore::new(dir.path().join("vaults")).unwrap();
+    let (key, v0) = new_vault("v0");
+    first.create(&name("alice"), &v0).unwrap();
+    let from_first = next(&key, &v0, "first");
+    let from_second = next(&key, &v0, "second");
+
+    first.save(&name("alice"), &from_first).unwrap();
+
+    assert_eq!(
+        second.save(&name("alice"), &from_second).err(),
+        Some(StorageError::Conflict)
+    );
+    assert_eq!(second.load(&name("alice")).unwrap(), from_first);
+}
+
+#[test]
+fn concurrent_saves_of_the_same_revision_let_exactly_one_through() {
+    let (dir, creator) = store();
+    let (key, v0) = new_vault("v0");
+    creator.create(&name("alice"), &v0).unwrap();
+    let barrier = Arc::new(Barrier::new(8));
+
+    // Spawn every thread before joining any, or the barrier never fills.
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let store = FileStore::new(dir.path().join("vaults")).unwrap();
+            let sealed = next(&key, &v0, &format!("session {i}"));
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.save(&name("alice"), &sealed)
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert!(
+        results
+            .iter()
+            .all(|r| matches!(r, Ok(()) | Err(StorageError::Conflict)))
+    );
+    assert_eq!(creator.load(&name("alice")).unwrap().header.revision(), 1);
+}
+
+#[test]
+fn save_waits_for_a_held_lock() {
+    let (dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+    let lock = std::fs::File::create(lock_path(&dir, "alice")).unwrap();
+    lock.lock().unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        lock.unlock().unwrap();
+    });
+
+    let v1 = next(&key, &v0, "v1");
+    store.save(&name("alice"), &v1).unwrap();
+
+    releaser.join().unwrap();
+    assert_eq!(store.load(&name("alice")).unwrap(), v1);
 }
 
 // --- Files that aren't vaults ---
@@ -319,14 +429,11 @@ fn empty_file_is_not_a_vault() {
 }
 
 #[test]
-fn other_sqlite_database_is_not_a_vault() {
+fn sqlite_database_is_not_a_vault() {
     let (dir, store) = store();
-    let conn = rusqlite::Connection::open(make_vault_home(&dir, "alice")).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE vault (id INTEGER, revision INTEGER, header BLOB, body BLOB);",
-    )
-    .unwrap();
-    drop(conn);
+    let mut bytes = b"SQLite format 3\0".to_vec();
+    bytes.resize(4096, 0);
+    std::fs::write(make_vault_home(&dir, "alice"), bytes).unwrap();
 
     assert_eq!(
         store.load(&name("alice")).err(),
@@ -335,13 +442,10 @@ fn other_sqlite_database_is_not_a_vault() {
 }
 
 #[test]
-fn unknown_storage_schema_version_is_not_a_vault() {
+fn file_shorter_than_the_header_is_not_a_vault() {
     let (dir, store) = store();
-    store.create(&name("alice"), &new_vault("[]").1).unwrap();
-    rusqlite::Connection::open(vault_path(&dir, "alice"))
-        .unwrap()
-        .pragma_update(None, "user_version", 99)
-        .unwrap();
+    let header = new_vault("[]").1.header.encode();
+    std::fs::write(make_vault_home(&dir, "alice"), &header[..header.len() - 1]).unwrap();
 
     assert_eq!(
         store.load(&name("alice")).err(),
@@ -350,13 +454,13 @@ fn unknown_storage_schema_version_is_not_a_vault() {
 }
 
 #[test]
-fn header_revision_disagreeing_with_the_stored_revision_is_not_a_vault() {
+fn wrong_magic_is_not_a_vault() {
     let (dir, store) = store();
     store.create(&name("alice"), &new_vault("[]").1).unwrap();
-    rusqlite::Connection::open(vault_path(&dir, "alice"))
-        .unwrap()
-        .execute("UPDATE vault SET revision = 7", [])
-        .unwrap();
+    let path = vault_path(&dir, "alice");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
 
     assert_eq!(
         store.load(&name("alice")).err(),
@@ -365,18 +469,32 @@ fn header_revision_disagreeing_with_the_stored_revision_is_not_a_vault() {
 }
 
 #[test]
-fn malformed_header_is_not_a_vault() {
+fn unknown_format_version_is_not_a_vault() {
     let (dir, store) = store();
     store.create(&name("alice"), &new_vault("[]").1).unwrap();
-    rusqlite::Connection::open(vault_path(&dir, "alice"))
-        .unwrap()
-        .execute("UPDATE vault SET header = x'00'", [])
-        .unwrap();
+    let path = vault_path(&dir, "alice");
+    let mut bytes = std::fs::read(&path).unwrap();
+    // Bytes 4..6 are the format version.
+    bytes[4..6].copy_from_slice(&0x7fffu16.to_be_bytes());
+    std::fs::write(&path, bytes).unwrap();
 
     assert_eq!(
         store.load(&name("alice")).err(),
         Some(StorageError::NotAVault)
     );
+}
+
+#[test]
+fn saving_over_a_file_that_is_not_a_vault_is_not_a_vault() {
+    let (dir, store) = store();
+    let (key, v0) = new_vault("[]");
+    std::fs::write(make_vault_home(&dir, "alice"), b"junk").unwrap();
+
+    assert_eq!(
+        store.save(&name("alice"), &next(&key, &v0, "v1")).err(),
+        Some(StorageError::NotAVault)
+    );
+    assert_eq!(std::fs::read(vault_path(&dir, "alice")).unwrap(), b"junk");
 }
 
 #[test]
@@ -491,6 +609,32 @@ mod permissions {
         store.save(&name("alice"), &next(&key, &v0, "v1")).unwrap();
 
         assert_eq!(mode(&vault_path(&dir, "alice")), 0o600);
+    }
+
+    #[test]
+    fn lock_file_is_private_to_its_owner() {
+        let (dir, store) = store();
+        let (key, v0) = new_vault("[]");
+        store.create(&name("alice"), &v0).unwrap();
+        store.save(&name("alice"), &next(&key, &v0, "v1")).unwrap();
+
+        assert_eq!(mode(&lock_path(&dir, "alice")), 0o600);
+    }
+
+    #[test]
+    fn symlinked_lock_file_is_refused_and_its_target_untouched() {
+        let (dir, store) = store();
+        let (key, v0) = new_vault("[]");
+        store.create(&name("alice"), &v0).unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, lock_path(&dir, "alice")).unwrap();
+
+        assert_eq!(
+            store.save(&name("alice"), &next(&key, &v0, "v1")).err(),
+            Some(StorageError::Io)
+        );
+        assert!(!elsewhere.exists());
+        assert_eq!(store.load(&name("alice")).unwrap(), v0);
     }
 
     #[test]

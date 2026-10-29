@@ -21,7 +21,7 @@ use chrono::Local;
 use vault_core::crypto::MasterPassword;
 use vault_core::generator::{self, DEFAULT_PASSWORD_LENGTH, GeneratorError};
 use vault_core::session::{CustomField, HiddenValue, Saved, Secret, Session, SessionError};
-use vault_core::storage::SqliteStore;
+use vault_core::storage::FileStore;
 
 use crate::args::ShellCommand;
 use crate::clipboard::CLEAR_AFTER;
@@ -30,7 +30,7 @@ use crate::terminal::{Terminal, TerminalError};
 
 /// The session of the vault shell, shared with the auto-lock and signal threads;
 /// `None` once it has been locked.
-pub(crate) type SharedSession = Arc<Mutex<Option<Session<SqliteStore>>>>;
+pub(crate) type SharedSession = Arc<Mutex<Option<Session<FileStore>>>>;
 
 /// Whether the shell goes on after a command.
 #[derive(Debug, PartialEq, Eq)]
@@ -378,7 +378,7 @@ fn log(
 /// ```
 fn with_session<R>(
     session: &SharedSession,
-    f: impl FnOnce(&mut Session<SqliteStore>) -> Result<R, CommandError>,
+    f: impl FnOnce(&mut Session<FileStore>) -> Result<R, CommandError>,
 ) -> Result<R, CommandError> {
     let mut guard = session.lock().unwrap_or_else(PoisonError::into_inner);
     let session = guard.as_mut().ok_or(SessionError::Locked)?;

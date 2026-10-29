@@ -19,7 +19,7 @@ The app consists of 6 modules with responsibilities split between them. The goal
 | CLI | Command parsing, terminal output, one-secret reveal, clipboard |
 | Session | Unlock/lock state and session lifetime; holds the decrypted secrets, reveals them one at a time; owns the secret model and its serialization; **handles plaintext in memory** |
 | Encryption | Encryption/decryption, key derivation, key wrap, nonces, salts, padding, header encoding; passes decrypted plaintext only to Session |
-| Storage | Vault files (SQLite), schemas |
+| Storage | Vault files (flat `header ‖ body` files), atomic and revision-checked saves |
 | Audit log	| Structured events - unlocks, failed unlock attempts, locks, vault changes |
 | Backup | Ciphertext-only export of the user's vault |
 
@@ -28,7 +28,7 @@ flowchart LR
   CLI -->|vaultname + master password| SE[Session] -->|master password, plaintext| ENC[Encryption]
   ENC -->|plaintext| SE
   SE -->|one revealed secret| CLI
-  ENC -->|header + ciphertext| ST[(Storage / SQL)] -->|header + ciphertext| ENC
+  ENC -->|header + ciphertext| ST[(Storage / vault file)] -->|header + ciphertext| ENC
   SE --> LOG[Audit log]; ST -->|ciphertext copy| BK[Backup]
 ```
 
@@ -58,7 +58,7 @@ sequenceDiagram
 
 ## 3. Design decisions
 
-**Vault format.** Each user's vault is a separate SQLite file (ADR-0006), created by `vault init` as `secrets.vault` in its vault home, a directory named after its vaultname (ADR-0009). The directory name is the plain vaultname (not a hash), so a vault can still be found if its name is half-remembered; the contents stay encrypted. It holds a plaintext header + encrypted body (all secrets), header authenticated as associated data. This way it doesn't leak the number of secrets or existence of a specific secret (e.g. existence of a github account). A secret is everything needed to access one service: its credentials and metadata (title, username, password, URL, tags, ...).
+**Vault format.** Each user's vault is a separate flat file (ADR-0011), created by `vault init` as `secrets.vault` in its vault home, a directory named after its vaultname (ADR-0009). The directory name is the plain vaultname (not a hash), so a vault can still be found if its name is half-remembered; the contents stay encrypted. It holds a plaintext header + encrypted body (all secrets), header authenticated as associated data. This way it doesn't leak the number of secrets or existence of a specific secret (e.g. existence of a github account). A secret is everything needed to access one service: its credentials and metadata (title, username, password, URL, tags, ...).
 
 It is also impossible to read other users' secrets: a session only ever opens the one vault it unlocked, and another user's file will not decrypt even if somehow obtained.
 
@@ -105,11 +105,11 @@ They might forget to lock the vault, accidentally copy or display all their secr
 | Vault at rest | Header tampering | Header is authenticated as associated data so altered fields fail the tag check; no KDF params are read from the header (the format version fixes them), so a crafted header can't force a huge allocation |
 | Vault at rest | Two vaults with the same master password swapped on disk | Accepted: needs write access to the vault directory and reveals nothing; vaults with different passwords fail to unlock (ADR-0004) |
 | Vault at rest | Rollback: an older copy of the vault file put in place of the current one, bringing back a rotated password or dropping newer secrets | Accepted: detection needs trusted state the attacker can't roll back at the same time (hardware counter, remote server or a per-device state file), which is out of scope. An attacker with write access to the vault directory can usually replace the binary anyway. The authenticated revision counter only orders backups and writes; it is not rollback protection |
-| Vault at rest | Corruption or crash mid-write losing the vault | Each save is one SQLite transaction (`journal_mode=DELETE`, `synchronous=FULL`); `init` builds the new vault in a temp file and hard-links it into place (ADR-0006) |
+| Vault at rest | Corruption or crash mid-write losing the vault | Each save writes a temp file, fsyncs it and renames it over the vault file under a lock; `init` builds the new vault in a temp file and hard-links it into place (ADR-0011) |
 | Vault at rest | Two sessions on the same vault overwriting each other's changes | A save only succeeds if the stored revision is the one it follows; otherwise it fails with a conflict and the session must unlock again |
-| Vault at rest | Crafted vault file attacking the SQLite parser (e.g. a restored backup from an untrusted place) | Every connection enables `SQLITE_DBCONFIG_DEFENSIVE` and `trusted_schema=OFF`, and checks `application_id` and `user_version` before reading any table (ADR-0006) |
+| Vault at rest | Crafted vault file attacking the parser (e.g. a restored backup from an untrusted place) | The vault file is `header ‖ body` with no container; its only parser is the strict, fixed-length header decoder, and the body is authenticated before use (ADR-0011) |
 | Vault at rest | Old ciphertext left in the file after a save, e.g. the header wrapped under a rotated master password | `secure_delete=ON` zeroes freed pages. Accepted: blocks of the deleted rollback journal may remain on disk |
-| Vault at rest | Malicious crafted input reaching the parser or a query | #![forbid(unsafe_code)] and parameterized SQL; header parser fuzzed |
+| Vault at rest | Malicious crafted input reaching the parser or a query | #![forbid(unsafe_code)]; no query language, so nothing to inject into (ADR-0011); header parser fuzzed |
 | Vault at rest | Vaultname used as a directory name: path traversal or overwriting another file | Vaultnames allowlisted (restricted charset and length); the vault home path is built only inside the vault directory; a vault home that is a symlink is refused; `init` refuses an existing vaultname |
 | Vault at rest | Vault home names reveal vaultnames to other local users | Accepted: keeps a vault recoverable when its name is forgotten; the contents stay encrypted |
 | Vault in memory | Memory dump or core file of a running process | Vault key in locked pages, zeroed on lock; core dumps disabled |

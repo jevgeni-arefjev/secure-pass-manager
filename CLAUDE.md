@@ -11,8 +11,8 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 
 ## Decisions
 
-- SQLite for both CLI and web; storage behind a trait so the backend stays swappable.
-- Each user's vault is a separate SQLite file named after its vaultname (`vault init` asks for it). MVP handles one user; unlock code lives in `vault-core::session` so multi-user extends it.
+- A flat file (`header ‖ body`) per vault for both CLI and web, no database (ADR-0011); storage behind a trait so the backend stays swappable.
+- Each user's vault is a separate file in a vault home named after its vaultname (`vault init` asks for it). MVP handles one user; unlock code lives in `vault-core::session` so multi-user extends it.
 - No master password hash is stored: unlock succeeds only if the vault key unwraps.
 - Core stays as modules in one crate, not separate crates.
 - Crypto: Argon2id (m=256 MiB, t=3, p=1) for the KEK, with KDF params fixed by the format version in the vault header (ADR-0005); XChaCha20-Poly1305 for both the vault-key wrap and the body; HKDF-SHA-256 for the body key. Do not change algorithms or params without asking.
@@ -29,6 +29,7 @@ These are deliberate design choices that differ from `course-project-requirement
 
 - **Master password storage.** Requirements ask for the master password to be stored as a hash (e.g. bcrypt). Here nothing is stored: unlock derives a KEK with Argon2id and tries to unwrap the vault key, and a failed tag check is a wrong password. This avoids keeping a second offline brute-force target.
 - **Per-user ownership on every record operation.** Requirements imply a shared database with per-record ownership checks. Here each user has a separate vault file, and a session only opens the vault it unlocked, so other users' secrets are never reachable (and wouldn't decrypt anyway). Ownership is enforced once, when the vault file is opened.
+- **No SQL, so no parameterized statements.** Requirements name prepared, parameterized statements as the SQL injection defence. Here the vault file is a flat `header ‖ body` file with no query language, so injection is ruled out by design. Approved by the instructor (ADR-0011).
 
 ## General rules
 

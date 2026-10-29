@@ -27,7 +27,7 @@ use vault_core::audit::{AuditSink, FileSink};
 use vault_core::crypto::MasterPassword;
 use vault_core::generator;
 use vault_core::session::{Clock, Session, SessionConfig, SessionError};
-use vault_core::storage::{SqliteStore, StorageError, VaultStore, Vaultname};
+use vault_core::storage::{FileStore, StorageError, VaultStore, Vaultname};
 
 use crate::args::{self, Cli, Command, Open, ShellLine};
 use crate::commands::{self, CommandError, Flow, SharedSession};
@@ -191,7 +191,7 @@ fn open_vault(
             &"no data directory found; pass --vault-dir <PATH>",
         );
     };
-    let store = match SqliteStore::new(&dir) {
+    let store = match FileStore::new(&dir) {
         Ok(store) => store,
         Err(err) => return fail(terminal, &err),
     };
@@ -230,10 +230,10 @@ fn open_vault(
 /// ```
 fn create(
     terminal: &mut dyn Terminal,
-    store: &SqliteStore,
+    store: &FileStore,
     name: &Vaultname,
     config: &dyn Fn() -> SessionConfig,
-) -> Result<Session<SqliteStore>, Exit> {
+) -> Result<Session<FileStore>, Exit> {
     // A cheap check before any prompt; `Session::create` still refuses atomically.
     match store.load(name) {
         Err(StorageError::NotFound) => {}
@@ -269,10 +269,10 @@ fn create(
 /// ```
 fn unlock(
     terminal: &mut dyn Terminal,
-    store: &SqliteStore,
+    store: &FileStore,
     vaultname: &str,
     config: &dyn Fn() -> SessionConfig,
-) -> Result<Session<SqliteStore>, Exit> {
+) -> Result<Session<FileStore>, Exit> {
     for _ in 0..MAX_ATTEMPTS {
         let mut typed = match terminal.read_hidden("Master password: ") {
             Ok(typed) => typed,
@@ -299,7 +299,7 @@ fn unlock(
 fn vault_shell(
     terminal: &mut dyn Terminal,
     env: &Env,
-    session: Session<SqliteStore>,
+    session: Session<FileStore>,
     idle_minutes: u64,
 ) -> Exit {
     terminal.print(&format!(

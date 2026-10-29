@@ -1,5 +1,7 @@
 # SQLite as the vault file container
 
+**Superseded by [ADR-0011](0011-flat-file-as-vault-file-container.md): the vault file is now a flat `header ‖ body` file.**
+
 Each vault file is a SQLite database holding one row: the encoded header, the encrypted body, and the revision. A flat `header ‖ body` file written with temp file, fsync and rename would fit the format more naturally, since storage only ever handles two blobs: it needs no C code, its only parser is the strict `Header::decode`, and it leaves no stale pages behind. SQLite is kept because the ICS0027 requirements explicitly ask for prepared, parameterized statements against SQL injection, and arguing "there is no SQL" would be a third deviation for the instructor to approve. It also gives atomic, crash-safe saves and cross-process locking without hand-written file juggling. Storage sits behind the `VaultStore` trait, so a flat-file backend can replace it without touching the other modules.
 
 ## Considered Options

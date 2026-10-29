@@ -24,17 +24,17 @@
 //! use vault_core::audit::FileSink;
 //! use vault_core::crypto::MasterPassword;
 //! use vault_core::session::{HiddenValue, SessionError, Secret, Session, SessionConfig};
-//! use vault_core::storage::SqliteStore;
+//! use vault_core::storage::FileStore;
 //!
 //! let dir = tempfile::tempdir()?;
 //! let config = || SessionConfig::new(Arc::new(FileSink::new(dir.path())));
 //! let password = MasterPassword::new("correct horse battery".into());
 //! let mut session =
-//!     Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, config())?;
+//!     Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, config())?;
 //! session.save(Secret::new("GitHub").with_password(HiddenValue::new("s3cret!".into())))?;
 //! session.lock();
 //!
-//! let mut session = Session::unlock(SqliteStore::new(dir.path())?, "alice", &password, config())?;
+//! let mut session = Session::unlock(FileStore::new(dir.path())?, "alice", &password, config())?;
 //! let shown = session.reveal("github", |github| {
 //!     Ok::<_, SessionError>(github.password().map(|p| p.reveal().to_owned()))
 //! })?;
@@ -259,9 +259,9 @@ pub enum Saved {
 /// # use vault_core::audit::MemorySink;
 /// # use vault_core::crypto::MasterPassword;
 /// # use vault_core::session::{Session, SessionConfig};
-/// # use vault_core::storage::SqliteStore;
+/// # use vault_core::storage::FileStore;
 /// # let dir = tempfile::tempdir()?;
-/// # let store = SqliteStore::new(dir.path())?;
+/// # let store = FileStore::new(dir.path())?;
 /// let password = MasterPassword::new("correct horse battery".into());
 /// let session =
 ///     Session::create_insecure_for_tests(store, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
@@ -310,8 +310,8 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
-    /// let store = SqliteStore::new("/home/alice/.local/share/secure-pass-manager/vaults")?;
+    /// # use vault_core::storage::FileStore;
+    /// let store = FileStore::new("/home/alice/.local/share/secure-pass-manager/vaults")?;
     /// let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create(store, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -335,11 +335,11 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    ///     FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -401,13 +401,13 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig, SessionError};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
     /// # let config = || SessionConfig::new(Arc::new(MemorySink::default()));
-    /// # Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, config())?;
+    /// # Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, config())?;
     /// let wrong = MasterPassword::new("wrong guess".into());
-    /// let result = Session::unlock(SqliteStore::new(dir.path())?, "alice", &wrong, config());
+    /// let result = Session::unlock(FileStore::new(dir.path())?, "alice", &wrong, config());
     /// assert_eq!(result.err(), Some(SessionError::UnlockFailed));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -465,11 +465,11 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "Alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    ///     FileStore::new(dir.path())?, "Alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// assert_eq!(session.vaultname().as_str(), "alice");
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -487,10 +487,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// assert!(session.is_unlocked());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -507,10 +507,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Secret, Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// session.save(Secret::new("GitHub").with_username("alice"))?;
     /// assert_eq!(session.get("github")?.username(), Some("alice"));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -535,10 +535,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{HiddenValue, Secret, Session, SessionConfig, SessionError};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// session.save(Secret::new("GitHub").with_password(HiddenValue::new("s3cret!".into())))?;
     /// session.reveal("github", |secret| {
     ///     println!("{}", secret.password().map_or("", HiddenValue::reveal));
@@ -568,10 +568,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// let newest = session.audit_log(20)?;
     /// assert_eq!(newest.len(), 1); // the vault was just created
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -592,10 +592,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// assert!(!session.contains("github")?);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -615,10 +615,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Secret, Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// session.save(Secret::new("gitlab"))?;
     /// session.save(Secret::new("GitHub"))?;
     /// let titles: Vec<_> = session.list()?.iter().map(|s| s.title()).collect();
@@ -643,10 +643,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{HiddenValue, Saved, Secret, Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// let github = Secret::new("GitHub").with_password(HiddenValue::new("s3cret!".into()));
     /// assert_eq!(session.save(github)?, Saved::Added);
     /// assert_eq!(session.save(Secret::new("github"))?, Saved::Replaced);
@@ -687,10 +687,10 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Secret, Session, SessionConfig, SessionError};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
-    /// # let mut session = Session::create_insecure_for_tests(SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+    /// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
     /// session.save(Secret::new("GitHub"))?;
     /// session.remove("github")?;
     /// assert_eq!(session.remove("github"), Err(SessionError::SecretNotFound));
@@ -722,11 +722,11 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// let old = MasterPassword::new("correct horse battery".into());
     /// let mut session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "alice", &old, SessionConfig::new(Arc::new(MemorySink::default())),
+    ///     FileStore::new(dir.path())?, "alice", &old, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// session.change_master_password(&old, &MasterPassword::new("tr0ub4dor & 3 staples".into()))?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -765,11 +765,11 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    ///     FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// session.lock(); // `session` can't be used any more
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -786,11 +786,11 @@ impl<S: VaultStore> Session<S> {
     /// # use vault_core::audit::MemorySink;
     /// # use vault_core::crypto::MasterPassword;
     /// # use vault_core::session::{Session, SessionConfig};
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// # let dir = tempfile::tempdir()?;
     /// # let password = MasterPassword::new("correct horse battery".into());
     /// let session = Session::create_insecure_for_tests(
-    ///     SqliteStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    ///     FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
     /// )?;
     /// session.lock_on_signal(); // e.g. from a SIGTERM handler
     /// # Ok::<(), Box<dyn std::error::Error>>(())

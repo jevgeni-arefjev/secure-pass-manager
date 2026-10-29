@@ -29,7 +29,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
 │       ├── crypto/         # header encoding, KDF params, locked + zeroized secret memory
 │       ├── generator.rs    # Password generator: uniform visible-ASCII passwords from the OS CSPRNG
-│       ├── storage.rs      # Storage: one vault home per vaultname holding `secrets.vault`, a SQLite file (header + encrypted body); hardened open, revision-checked saves (ADR-0006, ADR-0009)
+│       ├── storage.rs      # Storage: one vault home per vaultname holding `secrets.vault`, a flat file (header ‖ encrypted body); atomic, locked, revision-checked saves (ADR-0009, ADR-0011)
 │       ├── storage/        # vaultname validation
 │       ├── audit.rs        # Audit log: typed events as JSON Lines in `audit.log` per vault home, at most a title, rotated at 1 MiB, fail-open (ADR-0010)
 │       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
@@ -71,14 +71,12 @@ How the modules map to the specs:
 
 ### Prerequisites
 
-Rust 1.85 or newer (edition 2024). On a clean machine, install it with [rustup](https://rustup.rs):
+Rust 1.89 or newer (edition 2024). On a clean machine, install it with [rustup](https://rustup.rs):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
-
-A C compiler is also needed: SQLite is compiled from source (`rusqlite`'s `bundled` feature), so no system SQLite library is required. On Fedora `sudo dnf install gcc`, on Debian/Ubuntu `sudo apt install build-essential`, on macOS `xcode-select --install`.
 
 ### CLI
 
@@ -116,7 +114,7 @@ vault locked
 
 All commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands). Notes:
 
-- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
+- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
 - The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused.
 - The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
 - `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes. It holds titles in plaintext but never a field value.

@@ -8,7 +8,7 @@ use vault_cli::render::{self, Reveal};
 use vault_core::audit::{Event, Line, MemorySink, Record};
 use vault_core::crypto::MasterPassword;
 use vault_core::session::{CustomField, HiddenValue, Secret, Session, SessionConfig};
-use vault_core::storage::SqliteStore;
+use vault_core::storage::FileStore;
 
 /// Builds a hidden value from a literal.
 ///
@@ -121,7 +121,7 @@ fn saved_secret_view_shows_created_and_updated_times() -> Result<(), Box<dyn std
     let dir = tempfile::tempdir()?;
     let password = MasterPassword::new("correct horse battery".into());
     let mut session = Session::create_insecure_for_tests(
-        SqliteStore::new(dir.path())?,
+        FileStore::new(dir.path())?,
         "alice",
         &password,
         SessionConfig::new(Arc::new(MemorySink::default())),

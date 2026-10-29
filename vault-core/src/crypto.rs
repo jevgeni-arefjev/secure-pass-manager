@@ -217,7 +217,7 @@ pub fn simulate_unlock(password: &MasterPassword) -> Result<(), CryptoError> {
 /// ```
 pub fn open_body(key: &VaultKey, sealed: &SealedVault) -> Result<Plaintext, CryptoError> {
     let ciphertext_len = sealed.body.len().saturating_sub(TAG_LEN);
-    if ciphertext_len == 0 || ciphertext_len % BODY_PADDING != 0 {
+    if ciphertext_len == 0 || !ciphertext_len.is_multiple_of(BODY_PADDING) {
         return Err(CryptoError::BodyCorrupt);
     }
     let header = &sealed.header;

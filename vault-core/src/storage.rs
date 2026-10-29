@@ -1,30 +1,31 @@
 //! Storage module: vault files on disk.
 //!
 //! Each vault has a vault home, `<vault directory>/<vaultname>/` (ADR-0009), holding its
-//! vault file `secrets.vault`: one SQLite file with one row:
-//! the encoded header, the encrypted body and the revision (ADR-0006). Storage only
-//! ever handles what crypto sealed ([`SealedVault`]); it never sees plaintext or keys.
+//! vault file `secrets.vault`: the encoded header followed by the encrypted body, with
+//! no container around them (ADR-0011). Storage only ever handles what crypto sealed
+//! ([`SealedVault`]); it never sees plaintext or keys.
 //!
 //! Security:
 //! - Vaultnames are allowlisted by [`Vaultname`] before they become directory names;
 //!   a vault home that is a symlink or not a directory is refused.
-//! - Vault files may come from untrusted places, so every connection is opened with
-//!   SQLite's defensive mode and untrusted schema, and the file's `application_id` and
-//!   `user_version` are checked before any table is read.
-//! - `secure_delete` zeroes freed pages, so a save leaves no old ciphertext (e.g. a
-//!   header wrapped under a rotated master password) in the file.
-//! - A save is one transaction that only succeeds if the stored revision is the one
-//!   the new revision follows, so two sessions can't silently overwrite each other.
-//! - The vault directory and vault homes are `0700` and vault files `0600` (Unix);
-//!   looser permissions are logged as a warning and the vault still opens.
-//! - All statements are parameterized.
+//! - Vault files may come from untrusted places, so the only parser they meet is the
+//!   strict [`Header::decode`]; there is no query language to inject into.
+//! - Every write goes to a temp file that is fsynced, then renamed (or, on create,
+//!   hard-linked) into place, so a crash leaves the old vault or the new one, never a
+//!   mix, and the vault file never keeps old ciphertext.
+//! - A save holds an exclusive lock on `secrets.lock` and only succeeds if the stored
+//!   revision is the one the new revision follows, so two sessions can't silently
+//!   overwrite each other.
+//! - Vault and lock files are opened without following symlinks. The vault directory
+//!   and vault homes are `0700`, vault and lock files `0600` (Unix); looser permissions
+//!   are logged as a warning and the vault still opens.
 //!
 //! ```
 //! use vault_core::crypto::{self, MasterPassword, Plaintext};
-//! use vault_core::storage::{SqliteStore, VaultStore, Vaultname};
+//! use vault_core::storage::{FileStore, VaultStore, Vaultname};
 //!
 //! let dir = tempfile::tempdir()?;
-//! let store = SqliteStore::new(dir.path())?;
+//! let store = FileStore::new(dir.path())?;
 //! let password = MasterPassword::new("hunter2".into());
 //! let (_, sealed) = crypto::create_insecure_for_tests(&password, &Plaintext::new(b"[]".to_vec()))?;
 //!
@@ -37,42 +38,34 @@
 mod vaultname;
 
 use std::fmt;
-use std::fs::{self, Metadata};
-use std::io;
+use std::fs::{self, File, Metadata, OpenOptions, TryLockError};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use rusqlite::config::DbConfig;
-use rusqlite::{Connection, ErrorCode, OpenFlags, params};
+use tempfile::NamedTempFile;
 
 use crate::crypto::{Header, SealedVault};
 
 pub use vaultname::Vaultname;
 
-/// Marks a SQLite file as a vault file: `SPMV`, the same magic as the vault header.
-const APPLICATION_ID: i32 = 0x5350_4D56;
-
-/// Version of the SQL schema below, stored as `user_version`. Independent of the
-/// header's format version, which belongs to crypto.
-const SCHEMA_VERSION: i32 = 1;
-
-/// The whole schema: exactly one row per vault file.
-const SCHEMA: &str = "CREATE TABLE vault (
-    id       INTEGER PRIMARY KEY CHECK (id = 1),
-    revision INTEGER NOT NULL,
-    header   BLOB    NOT NULL,
-    body     BLOB    NOT NULL
-) STRICT;";
-
 /// Name of the vault file inside a vault home (ADR-0009). Fixed, so the vault home's
 /// name is the only place the vaultname lives.
 const VAULT_FILE: &str = "secrets.vault";
 
-/// How long a save waits for another session's write to finish before failing.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Name of the empty file a save locks while it checks the revision and replaces the
+/// vault file (ADR-0011). The vault file itself can't be locked: the rename replaces it.
+const LOCK_FILE: &str = "secrets.lock";
+
+/// How long a save waits for another session's save to finish before failing.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a waiting save sleeps between attempts to take the lock.
+const LOCK_RETRY: Duration = Duration::from_millis(10);
 
 /// Why a storage operation failed. Messages are fixed strings: they never carry paths,
-/// SQLite messages or file contents.
+/// OS messages or file contents.
 ///
 /// ```
 /// use vault_core::storage::StorageError;
@@ -89,10 +82,10 @@ pub enum StorageError {
     AlreadyExists,
     /// The save doesn't follow the stored revision: another session saved first.
     Conflict,
-    /// The file isn't a vault file this build can read: not SQLite, another SQLite
-    /// database, an unknown schema version, or a malformed or inconsistent row.
+    /// The file isn't a vault file this build can read: not a regular file, shorter
+    /// than a header, or a header with the wrong magic or an unknown format version.
     NotAVault,
-    /// The file system or SQLite failed.
+    /// The file system failed, or another session held the lock for too long.
     Io,
 }
 
@@ -124,14 +117,14 @@ impl std::error::Error for StorageError {}
 ///
 /// ```
 /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
-/// use vault_core::storage::{SqliteStore, VaultStore, Vaultname};
+/// use vault_core::storage::{FileStore, VaultStore, Vaultname};
 ///
 /// /// Works with any backend.
 /// fn revision_of(store: &impl VaultStore, name: &Vaultname) -> u64 {
 ///     store.load(name).map(|sealed| sealed.header.revision()).unwrap_or(0)
 /// }
 /// # let dir = tempfile::tempdir()?;
-/// # let store = SqliteStore::new(dir.path())?;
+/// # let store = FileStore::new(dir.path())?;
 /// # assert_eq!(revision_of(&store, &Vaultname::parse("alice")?), 0);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -141,9 +134,9 @@ pub trait VaultStore {
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
-    /// # use vault_core::storage::{SqliteStore, StorageError, VaultStore, Vaultname};
+    /// # use vault_core::storage::{FileStore, StorageError, VaultStore, Vaultname};
     /// # let dir = tempfile::tempdir()?;
-    /// # let store = SqliteStore::new(dir.path())?;
+    /// # let store = FileStore::new(dir.path())?;
     /// # let (_, sealed) = crypto::create_insecure_for_tests(&MasterPassword::new("pw".into()), &Plaintext::new(vec![]))?;
     /// let alice = Vaultname::parse("alice")?;
     /// store.create(&alice, &sealed)?;
@@ -157,9 +150,9 @@ pub trait VaultStore {
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
-    /// # use vault_core::storage::{SqliteStore, StorageError, VaultStore, Vaultname};
+    /// # use vault_core::storage::{FileStore, StorageError, VaultStore, Vaultname};
     /// # let dir = tempfile::tempdir()?;
-    /// # let store = SqliteStore::new(dir.path())?;
+    /// # let store = FileStore::new(dir.path())?;
     /// assert_eq!(store.load(&Vaultname::parse("nobody")?), Err(StorageError::NotFound));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -171,9 +164,9 @@ pub trait VaultStore {
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
-    /// # use vault_core::storage::{SqliteStore, StorageError, VaultStore, Vaultname};
+    /// # use vault_core::storage::{FileStore, StorageError, VaultStore, Vaultname};
     /// # let dir = tempfile::tempdir()?;
-    /// # let store = SqliteStore::new(dir.path())?;
+    /// # let store = FileStore::new(dir.path())?;
     /// # let alice = Vaultname::parse("alice")?;
     /// # let (key, v0) = crypto::create_insecure_for_tests(&MasterPassword::new("pw".into()), &Plaintext::new(vec![]))?;
     /// # store.create(&alice, &v0)?;
@@ -185,23 +178,23 @@ pub trait VaultStore {
     fn save(&self, name: &Vaultname, sealed: &SealedVault) -> Result<(), StorageError>;
 }
 
-/// Vault files as SQLite databases in one vault directory (ADR-0006). Every call opens
-/// its own connection and closes it before returning, so nothing holds the file while a
-/// session is idle.
+/// Vault files as flat `header ‖ body` files in one vault directory (ADR-0011). Every
+/// call opens the files it needs and closes them before returning, so nothing holds a
+/// vault file while a session is idle.
 ///
 /// ```
-/// use vault_core::storage::SqliteStore;
+/// use vault_core::storage::FileStore;
 ///
 /// let dir = tempfile::tempdir()?;
-/// let store = SqliteStore::new(dir.path().join("vaults"))?;
+/// let store = FileStore::new(dir.path().join("vaults"))?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Clone, Debug)]
-pub struct SqliteStore {
+pub struct FileStore {
     dir: PathBuf,
 }
 
-impl SqliteStore {
+impl FileStore {
     /// A store in the vault directory `dir`, creating it (and its parents) if needed.
     /// The front end picks the directory; storage never guesses one.
     ///
@@ -209,9 +202,9 @@ impl SqliteStore {
     /// group- or world-writable is logged as a warning, not refused.
     ///
     /// ```
-    /// # use vault_core::storage::SqliteStore;
+    /// # use vault_core::storage::FileStore;
     /// let dir = tempfile::tempdir()?;
-    /// let store = SqliteStore::new(dir.path().join("vaults"))?;
+    /// let store = FileStore::new(dir.path().join("vaults"))?;
     /// assert!(dir.path().join("vaults").is_dir());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -255,81 +248,71 @@ impl SqliteStore {
         existing_vault_home(&self.dir, name).map(drop)
     }
 
-    /// Opens `name`'s existing vault file as a hardened connection, after checking its
-    /// vault home and that it is a regular file holding a vault schema this build knows.
+    /// Checks that `name`'s vault home and vault file exist and that the vault file is a
+    /// regular file, without opening it.
     ///
-    /// Security: symlinks and directories are refused as [`StorageError::NotAVault`];
-    /// SQLite's own defences are on before it reads the file.
+    /// Security: symlinks, directories and special files (e.g. a FIFO, which would block
+    /// a read) are refused as [`StorageError::NotAVault`].
     ///
     /// ```ignore
-    /// let conn = self.open_existing(&alice)?;
+    /// self.check_vault_file(&alice)?;
     /// ```
-    fn open_existing(&self, name: &Vaultname) -> Result<Connection, StorageError> {
+    fn check_vault_file(&self, name: &Vaultname) -> Result<(), StorageError> {
         self.check_home(name)?;
-        let path = self.path(name);
-        let metadata = match fs::symlink_metadata(&path) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Err(StorageError::NotFound);
-            }
-            result => result.map_err(io_error)?,
-        };
+        match fs::symlink_metadata(self.path(name)) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Err(StorageError::NotFound),
+            Err(err) => Err(io_error(err)),
+            Ok(metadata) if metadata.is_file() => Ok(()),
+            Ok(_) => Err(StorageError::NotAVault),
+        }
+    }
+
+    /// Reads and parses `name`'s vault file, after [`Self::check_vault_file`].
+    ///
+    /// Security: opened with `O_NOFOLLOW` and checked again on the opened file, so it
+    /// can't be swapped for a symlink or special file between check and read.
+    ///
+    /// ```ignore
+    /// let sealed = self.read_vault(&alice)?;
+    /// ```
+    fn read_vault(&self, name: &Vaultname) -> Result<SealedVault, StorageError> {
+        self.check_vault_file(name)?;
+        let mut file =
+            open_no_follow(OpenOptions::new().read(true), &self.path(name)).map_err(io_error)?;
+        let metadata = file.metadata().map_err(io_error)?;
         if !metadata.is_file() {
             return Err(StorageError::NotAVault);
         }
         if is_loosely_permitted(&metadata) {
             tracing::warn!(event = "vault_file_permissions_loose", vaultname = %name);
         }
-        let conn = open_hardened(&path)?;
-        check_vault_schema(&conn)?;
-        configure_writes(&conn)?;
-        Ok(conn)
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(io_error)?;
+        decode_vault(bytes)
     }
 }
 
-impl VaultStore for SqliteStore {
-    /// Creates the vault home, builds the vault in a private temp file inside it, then
+impl VaultStore for FileStore {
+    /// Creates the vault home, writes the vault to a private temp file inside it, then
     /// hard-links it to `secrets.vault`, which fails if a vault is already there. A crash
     /// leaves at most an empty vault home or a stray temp file, never a half-made vault
     /// under `name`; a later `create` takes such a vault home over (ADR-0009).
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
-    /// # use vault_core::storage::{SqliteStore, VaultStore, Vaultname};
+    /// # use vault_core::storage::{FileStore, VaultStore, Vaultname};
     /// # let dir = tempfile::tempdir()?;
-    /// # let store = SqliteStore::new(dir.path())?;
+    /// # let store = FileStore::new(dir.path())?;
     /// # let (_, sealed) = crypto::create_insecure_for_tests(&MasterPassword::new("pw".into()), &Plaintext::new(vec![]))?;
     /// store.create(&Vaultname::parse("alice")?, &sealed)?;
     /// assert!(dir.path().join("alice/secrets.vault").is_file());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn create(&self, name: &Vaultname, sealed: &SealedVault) -> Result<(), StorageError> {
-        let revision = sql_revision(sealed.header.revision()).ok_or(StorageError::Io)?;
         let home = self.home(name);
         create_vault_home(&home).map_err(io_error)?;
         self.check_home(name)?;
-        // `tempfile` creates the file 0600 on Unix.
-        let temp = tempfile::Builder::new()
-            .prefix(".")
-            .suffix(".tmp")
-            .tempfile_in(&home)
-            .map_err(io_error)?;
-
-        let mut conn = open_hardened(temp.path())?;
-        configure_writes(&conn)?;
-        let tx = conn.transaction().map_err(sqlite_error)?;
-        tx.pragma_update(None, "application_id", APPLICATION_ID)
-            .map_err(sqlite_error)?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(sqlite_error)?;
-        tx.execute_batch(SCHEMA).map_err(sqlite_error)?;
-        tx.execute(
-            "INSERT INTO vault (id, revision, header, body) VALUES (1, ?1, ?2, ?3)",
-            params![revision, sealed.header.encode(), sealed.body],
-        )
-        .map_err(sqlite_error)?;
-        tx.commit().map_err(sqlite_error)?;
-        conn.close().map_err(|(_, err)| sqlite_error(err))?;
-
+        let temp = write_temp(&home, sealed).map_err(io_error)?;
         fs::hard_link(temp.path(), self.path(name)).map_err(|err| {
             if err.kind() == io::ErrorKind::AlreadyExists {
                 StorageError::AlreadyExists
@@ -342,14 +325,13 @@ impl VaultStore for SqliteStore {
         // Dropping `temp` removes the temp name; the vault keeps its final one.
     }
 
-    /// Reads the single row, parses the header and checks it agrees with the stored
-    /// revision.
+    /// Reads the vault file and splits it into the strictly parsed header and the body.
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
-    /// # use vault_core::storage::{SqliteStore, VaultStore, Vaultname};
+    /// # use vault_core::storage::{FileStore, VaultStore, Vaultname};
     /// # let dir = tempfile::tempdir()?;
-    /// # let store = SqliteStore::new(dir.path())?;
+    /// # let store = FileStore::new(dir.path())?;
     /// # let alice = Vaultname::parse("alice")?;
     /// # let (_, sealed) = crypto::create_insecure_for_tests(&MasterPassword::new("pw".into()), &Plaintext::new(vec![]))?;
     /// # store.create(&alice, &sealed)?;
@@ -357,29 +339,17 @@ impl VaultStore for SqliteStore {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn load(&self, name: &Vaultname) -> Result<SealedVault, StorageError> {
-        let conn = self.open_existing(name)?;
-        let (revision, header, body): (i64, Vec<u8>, Vec<u8>) = conn
-            .query_row(
-                "SELECT revision, header, body FROM vault WHERE id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(sqlite_error)?;
-        let header = Header::decode(&header).map_err(|_| StorageError::NotAVault)?;
-        if sql_revision(header.revision()) != Some(revision) {
-            return Err(StorageError::NotAVault);
-        }
-        Ok(SealedVault { header, body })
+        self.read_vault(name)
     }
 
-    /// One `UPDATE` (a single SQLite transaction) that only matches if the stored
-    /// revision is the one before `sealed`'s.
+    /// Under the vault home's lock: reads the stored revision, checks `sealed` follows
+    /// it, then writes `sealed` to a temp file and renames it over `secrets.vault`.
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
-    /// # use vault_core::storage::{SqliteStore, VaultStore, Vaultname};
+    /// # use vault_core::storage::{FileStore, VaultStore, Vaultname};
     /// # let dir = tempfile::tempdir()?;
-    /// # let store = SqliteStore::new(dir.path())?;
+    /// # let store = FileStore::new(dir.path())?;
     /// # let alice = Vaultname::parse("alice")?;
     /// # let (key, v0) = crypto::create_insecure_for_tests(&MasterPassword::new("pw".into()), &Plaintext::new(vec![]))?;
     /// # store.create(&alice, &v0)?;
@@ -388,26 +358,18 @@ impl VaultStore for SqliteStore {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn save(&self, name: &Vaultname, sealed: &SealedVault) -> Result<(), StorageError> {
-        let conn = self.open_existing(name)?;
-        let new = sealed.header.revision();
-        // No stored revision can precede revision 0 or one beyond SQLite's range.
-        let (Some(new_sql), Some(expected)) =
-            (sql_revision(new), new.checked_sub(1).and_then(sql_revision))
-        else {
+        // Checked before locking, so a missing vault leaves no lock file behind.
+        self.check_vault_file(name)?;
+        let home = self.home(name);
+        let _lock = lock_vault_home(&home)?;
+        let stored = self.read_vault(name)?.header.revision();
+        if sealed.header.revision().checked_sub(1) != Some(stored) {
             return Err(StorageError::Conflict);
-        };
-        let changed = conn
-            .execute(
-                "UPDATE vault SET revision = ?1, header = ?2, body = ?3
-                 WHERE id = 1 AND revision = ?4",
-                params![new_sql, sealed.header.encode(), sealed.body, expected],
-            )
-            .map_err(sqlite_error)?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(StorageError::Conflict)
         }
+        let temp = write_temp(&home, sealed).map_err(io_error)?;
+        temp.persist(self.path(name))
+            .map_err(|err| io_error(err.error))?;
+        sync_dir(&home).map_err(io_error)
     }
 }
 
@@ -449,102 +411,86 @@ pub(crate) fn existing_vault_home(dir: &Path, name: &Vaultname) -> Result<PathBu
     Ok(home)
 }
 
-/// Opens `path` as an existing SQLite file (never creating it, never following a
-/// symlink) with the defences for untrusted files on before the first read: defensive
-/// mode, untrusted schema, no URI parsing.
+/// Splits the bytes of a vault file into its header and body.
+///
+/// Security: these bytes are untrusted; [`Header::decode`] is their only parser. The
+/// body is returned as stored and only authenticated later, by crypto.
 ///
 /// ```ignore
-/// let conn = open_hardened(&path)?;
+/// assert_eq!(decode_vault(b"junk".to_vec()), Err(StorageError::NotAVault));
 /// ```
-fn open_hardened(path: &Path) -> Result<Connection, StorageError> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(sqlite_error)?;
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
-        .map_err(sqlite_error)?;
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
-        .map_err(sqlite_error)?;
-    conn.busy_timeout(BUSY_TIMEOUT).map_err(sqlite_error)?;
-    Ok(conn)
-}
-
-/// Refuses any file whose `application_id` or `user_version` isn't ours, before a
-/// table is queried.
-///
-/// ```ignore
-/// check_vault_schema(&conn)?;
-/// ```
-fn check_vault_schema(conn: &Connection) -> Result<(), StorageError> {
-    let read = |pragma| {
-        conn.pragma_query_value(None, pragma, |row| row.get::<_, i32>(0))
-            .map_err(sqlite_error)
-    };
-    if read("application_id")? == APPLICATION_ID && read("user_version")? == SCHEMA_VERSION {
-        Ok(())
-    } else {
-        Err(StorageError::NotAVault)
+fn decode_vault(mut bytes: Vec<u8>) -> Result<SealedVault, StorageError> {
+    if bytes.len() < Header::LEN {
+        return Err(StorageError::NotAVault);
     }
+    let body = bytes.split_off(Header::LEN);
+    let header = Header::decode(&bytes).map_err(|_| StorageError::NotAVault)?;
+    Ok(SealedVault { header, body })
 }
 
-/// Sets how writes reach the disk: freed pages zeroed (`secure_delete`), a rollback
-/// journal that is deleted after each commit so the vault stays one file, and a full
-/// fsync per commit.
+/// Writes `sealed` as `header ‖ body` to a new temp file in the vault home `home` and
+/// fsyncs it. The caller links or renames it into place; dropping it removes it.
+///
+/// Security: `tempfile` creates the file `0600` (Unix) with a random name, so it can't
+/// be pre-created or read by others.
 ///
 /// ```ignore
-/// configure_writes(&conn)?;
+/// let temp = write_temp(&home, &sealed)?;
+/// temp.persist(home.join(VAULT_FILE))?;
 /// ```
-fn configure_writes(conn: &Connection) -> Result<(), StorageError> {
-    let secure_delete: i64 = conn
-        .pragma_update_and_check(None, "secure_delete", true, |row| row.get(0))
-        .map_err(sqlite_error)?;
-    let journal_mode: String = conn
-        .pragma_update_and_check(None, "journal_mode", "DELETE", |row| row.get(0))
-        .map_err(sqlite_error)?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(sqlite_error)?;
-    if secure_delete == 1 && journal_mode.eq_ignore_ascii_case("delete") {
-        Ok(())
-    } else {
-        Err(StorageError::Io)
+fn write_temp(home: &Path, sealed: &SealedVault) -> io::Result<NamedTempFile> {
+    let mut temp = tempfile::Builder::new()
+        .prefix(".")
+        .suffix(".tmp")
+        .tempfile_in(home)?;
+    temp.write_all(&sealed.header.encode())?;
+    temp.write_all(&sealed.body)?;
+    temp.as_file().sync_all()?;
+    Ok(temp)
+}
+
+/// Takes the exclusive lock on the vault home's `secrets.lock`, creating the file if
+/// needed, and returns it; the lock is held until the file is dropped. Retries for up
+/// to [`LOCK_TIMEOUT`], then fails with [`StorageError::Io`].
+///
+/// Security: the lock file is created `0600` (Unix) and opened with `O_NOFOLLOW`, so a
+/// planted symlink can't make a save create or lock a file elsewhere.
+///
+/// ```ignore
+/// let _lock = lock_vault_home(&home)?;
+/// ```
+fn lock_vault_home(home: &Path) -> Result<File, StorageError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = open_no_follow(&options, &home.join(LOCK_FILE)).map_err(io_error)?;
+    if !file.metadata().map_err(io_error)?.is_file() {
+        return Err(StorageError::Io);
     }
-}
-
-/// A header revision as SQLite's signed integer; `None` beyond `i64::MAX`.
-///
-/// ```ignore
-/// assert_eq!(sql_revision(1), Some(1));
-/// ```
-fn sql_revision(revision: u64) -> Option<i64> {
-    i64::try_from(revision).ok()
-}
-
-/// Maps a SQLite error to a storage error: anything that means "this file isn't a
-/// valid vault" becomes [`StorageError::NotAVault`], the rest [`StorageError::Io`].
-/// The SQLite message is dropped.
-///
-/// ```ignore
-/// conn.query_row(...).map_err(sqlite_error)?;
-/// ```
-fn sqlite_error(err: rusqlite::Error) -> StorageError {
-    use rusqlite::Error as E;
-    match err {
-        E::QueryReturnedNoRows | E::InvalidColumnType(..) | E::FromSqlConversionFailure(..) => {
-            StorageError::NotAVault
+    let deadline = Instant::now() + LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(LOCK_RETRY);
+            }
+            Err(_) => return Err(StorageError::Io),
         }
-        // `Unknown` is SQLITE_ERROR, e.g. a missing table or column.
-        _ if matches!(
-            err.sqlite_error_code(),
-            Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt | ErrorCode::Unknown)
-        ) =>
-        {
-            StorageError::NotAVault
-        }
-        _ => StorageError::Io,
     }
+}
+
+/// Opens `path` with `options`, never following a symlink (`O_NOFOLLOW` on Unix; a
+/// plain open elsewhere).
+///
+/// ```ignore
+/// let file = open_no_follow(OpenOptions::new().read(true), &path)?;
+/// ```
+fn open_no_follow(options: &OpenOptions, path: &Path) -> io::Result<File> {
+    let mut options = options.clone();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    options.open(path)
 }
 
 /// Maps a file system error to [`StorageError::Io`], dropping its message (which may
