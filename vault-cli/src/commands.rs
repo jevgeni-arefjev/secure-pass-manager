@@ -1,5 +1,5 @@
-//! The commands of the vault shell (`get`, `save`, `list`, `rm`, `gen`, `passwd`, `log`,
-//! `lock`).
+//! The commands of the vault shell (`get`, `save`, `list`, `rm`, `gen`, `passwd`,
+//! `backup`, `log`, `lock`).
 //!
 //! Every command reads what it needs from the person first and only then takes the
 //! session, so a prompt left waiting never holds the vault open: auto-lock can wipe it
@@ -15,9 +15,11 @@
 //! - Error messages are fixed strings; none includes a field value.
 
 use std::fmt;
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::Local;
+use vault_core::backup::Destination;
 use vault_core::crypto::MasterPassword;
 use vault_core::generator::{self, DEFAULT_PASSWORD_LENGTH, GeneratorError};
 use vault_core::session::{CustomField, HiddenValue, Saved, Secret, Session, SessionError};
@@ -129,15 +131,17 @@ impl From<GeneratorError> for CommandError {
     }
 }
 
-/// Runs one vault shell command.
+/// Runs one vault shell command. `vault_dir` is the vault directory the session's
+/// vault lives in; `backup` refuses destinations inside it.
 ///
 /// ```ignore
-/// let flow = commands::execute(ShellCommand::List, terminal, &session)?;
+/// let flow = commands::execute(ShellCommand::List, terminal, &session, &vault_dir)?;
 /// ```
 pub(crate) fn execute(
     command: ShellCommand,
     terminal: &mut dyn Terminal,
     session: &SharedSession,
+    vault_dir: &Path,
 ) -> Result<Flow, CommandError> {
     match command {
         ShellCommand::Get { title, show, copy } => get(terminal, session, &title, show, copy)?,
@@ -146,6 +150,7 @@ pub(crate) fn execute(
         ShellCommand::Rm { title } => remove(terminal, session, &title)?,
         ShellCommand::Gen(options) => generate(terminal, options.length)?,
         ShellCommand::Passwd => change_master_password(terminal, session)?,
+        ShellCommand::Backup { path } => backup(terminal, session, vault_dir, &path)?,
         ShellCommand::Log { limit } => log(terminal, session, limit.into())?,
         ShellCommand::Lock => return Ok(Flow::Lock),
     }
@@ -353,6 +358,27 @@ fn change_master_password(
         Ok(session.change_master_password(&current, &new)?)
     })?;
     terminal.print("master password changed");
+    Ok(())
+}
+
+/// `backup`: writes a verified ciphertext copy of the vault to the new file `path`,
+/// outside `vault_dir`, and says which revision it holds.
+///
+/// ```ignore
+/// backup(terminal, session, &vault_dir, Path::new("/media/usb/alice.vault"))?;
+/// ```
+fn backup(
+    terminal: &mut dyn Terminal,
+    session: &SharedSession,
+    vault_dir: &Path,
+    path: &Path,
+) -> Result<(), CommandError> {
+    let dest = Destination::new(path, vault_dir).map_err(SessionError::from)?;
+    let revision = with_session(session, |session| Ok(session.backup(&dest)?))?;
+    terminal.print(&format!(
+        "Backup written to {} (revision {revision}). It opens with the master password this vault has now.",
+        render::escape(&path.to_string_lossy(), false).as_str()
+    ));
     Ok(())
 }
 

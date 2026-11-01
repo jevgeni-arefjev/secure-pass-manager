@@ -7,7 +7,7 @@ GUI document: `web-app-security.md`
 This app is:
 - Desktop native
 - Multi-user on single device: each user has their own vault file, identified by its vaultname (no teams or secret sharing)
-- Fully local (no automatic backuping plan yet, only ciphertext export)
+- Fully local (no automatic backuping plan yet, only ciphertext backups made by hand)
 - Unlocked with a vaultname and master password (later maybe with MFA, Google SSO or similar)
 
 ## 2. Architecture
@@ -21,7 +21,7 @@ The app consists of 6 modules with responsibilities split between them. The goal
 | Encryption | Encryption/decryption, key derivation, key wrap, nonces, salts, padding, header encoding; passes decrypted plaintext only to Session |
 | Storage | Vault files (flat `header ‖ body` files), atomic and revision-checked saves |
 | Audit log	| Structured events - unlocks, failed unlock attempts, locks, vault changes |
-| Backup | Ciphertext-only export of the user's vault |
+| Backup | Ciphertext-only copy of the user's vault file, verified before it is put in place |
 
 ```mermaid
 flowchart LR
@@ -149,11 +149,11 @@ list                          # all secrets: title, username, URL, tags; never h
 rm <title>                    # remove a secret after confirming
 gen [--length 24]             # print a random password and offer to copy it
 passwd                        # change the master password
+backup <path>                 # write an encrypted copy of the vault file to a new file outside the vault directory
+log [--limit 20]              # show the vault's audit log, newest first
 lock | exit | quit            # lock the vault and leave the shell (also Ctrl-D)
 help                          # list the commands
 ```
-
-Planned: `export-cypher <path>` (ciphertext copy of your vault file, with the backup module) and commands to view the audit log.
 
 The session is an interactive shell: `vault unlock` prompts for the vaultname and master password and opens a `vault>` prompt where the commands above run. Vault keys live only in that process and are never written to disk; `lock`, Ctrl-D, the idle timeout or a termination signal wipes them, and the process ends with them. Hidden fields are never accepted as arguments, only through hidden prompts.
 
@@ -162,4 +162,5 @@ The session is an interactive shell: `vault unlock` prompts for the vaultname an
 - **Saving.** `save` asks for username, password, URL, notes, tags, then custom fields one by one, each marked hidden or not. An empty password is generated (24 characters). Titles with spaces are quoted: `get "my bank"`.
 - **Auto-lock.** After the idle timeout (default 5 minutes, `--idle-timeout` 1-60) the keys are wiped at once and the clipboard is cleared; the shell then exits on the next input. A prompt left waiting doesn't keep the vault open.
 - **Clipboard.** `--copy` clears the clipboard after 20 seconds, on lock and on exit, if it still holds the copied value.
+- **Backup.** `backup <path>` copies `secrets.vault` exactly as stored, never decrypted; the audit log is not copied. The path must not exist yet (not even as a symlink), and its directory must exist and be outside the vault directory. The copy is written to a `0600` temp file next to the path, read back, checked to be the stored vault and to open with the session's vault key, and only then renamed into place without overwriting. If another session saved since unlock, `backup` locks like a save conflict. The audit log records the revision, not the path. There is no restore command: create a vault home and put the backup in it as `secrets.vault`; any vaultname works (ADR-0004, ADR-0009).
 

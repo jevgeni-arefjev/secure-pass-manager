@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use chrono::DateTime;
 
 use crate::audit::{AuditSink, Event, Line, Record};
+use crate::backup::{self, BackupError, Destination};
 use crate::crypto::{self, CryptoError, Header, MasterPassword, Plaintext, SealedVault, VaultKey};
 use crate::storage::{StorageError, VaultStore, Vaultname};
 
@@ -146,6 +147,8 @@ pub enum SessionError {
     Randomness,
     /// The audit log couldn't be read.
     AuditLog,
+    /// A backup couldn't be made.
+    Backup(BackupError),
 }
 
 impl fmt::Display for SessionError {
@@ -171,6 +174,7 @@ impl fmt::Display for SessionError {
             Self::Storage => StorageError::Io.fmt(f),
             Self::Randomness => CryptoError::Randomness.fmt(f),
             Self::AuditLog => f.write_str("audit log can't be read"),
+            Self::Backup(err) => err.fmt(f),
         }
     }
 }
@@ -220,6 +224,18 @@ impl From<WeakMasterPassword> for SessionError {
     /// ```
     fn from(err: WeakMasterPassword) -> Self {
         Self::WeakMasterPassword(err)
+    }
+}
+
+impl From<BackupError> for SessionError {
+    /// Wraps a backup failure.
+    ///
+    /// ```
+    /// # use vault_core::{backup::BackupError, session::SessionError};
+    /// assert_eq!(SessionError::from(BackupError::Exists), SessionError::Backup(BackupError::Exists));
+    /// ```
+    fn from(err: BackupError) -> Self {
+        Self::Backup(err)
     }
 }
 
@@ -758,6 +774,57 @@ impl<S: VaultStore> Session<S> {
         Ok(())
     }
 
+    /// Writes a backup of this vault to `dest` and returns the revision it holds.
+    ///
+    /// The vault file is copied as stored, never decrypted for output. The copy is
+    /// written next to `dest`, read back, checked to be byte-for-byte the stored vault
+    /// and to open with this session's vault key, and only then put in place.
+    ///
+    /// Security: if the stored vault isn't the revision this session holds (another
+    /// session saved first), the session locks as on a save conflict
+    /// ([`SessionError::Conflict`]), so a backup always opens with the master password
+    /// this session was unlocked with. The audit event records the revision, not the
+    /// path.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
+    /// # use vault_core::backup::Destination;
+    /// # use vault_core::crypto::MasterPassword;
+    /// # use vault_core::session::{Session, SessionConfig};
+    /// # use vault_core::storage::FileStore;
+    /// let vaults = tempfile::tempdir()?;
+    /// let elsewhere = tempfile::tempdir()?;
+    /// # let password = MasterPassword::new("correct horse battery".into());
+    /// let mut session = Session::create_insecure_for_tests(
+    ///     FileStore::new(vaults.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    /// )?;
+    /// let dest = Destination::new(&elsewhere.path().join("alice.vault"), vaults.path())?;
+    /// assert_eq!(session.backup(&dest)?, 0);
+    /// assert!(elsewhere.path().join("alice.vault").is_file());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn backup(&mut self, dest: &Destination) -> Result<u64, SessionError> {
+        let held = self.vault()?.header.clone();
+        let stored = self.store.load(&self.vaultname)?;
+        if stored.header != held {
+            return Err(self.lock_on_conflict());
+        }
+        let staged = backup::stage(dest, &stored)?;
+        let key = &self.open.as_ref().expect("checked unlocked above").key;
+        // The decrypted body is only checked, never kept: dropping it wipes it.
+        let verified = staged
+            .read_back()
+            .is_ok_and(|copy| copy == stored && crypto::open_body(key, &copy).is_ok());
+        if !verified {
+            return Err(BackupError::Unverified.into());
+        }
+        staged.commit()?;
+        let revision = stored.header.revision();
+        self.record(Event::BackupCreated { revision });
+        Ok(revision)
+    }
+
     /// Locks the vault: ends the session and wipes its keys and secrets.
     ///
     /// ```
@@ -878,13 +945,21 @@ impl<S: VaultStore> Session<S> {
     /// ```
     fn write(&mut self, sealed: &SealedVault) -> Result<(), SessionError> {
         match self.store.save(&self.vaultname, sealed) {
-            Err(StorageError::Conflict) => {
-                self.open = None;
-                self.record(Event::LockedOnConflict);
-                Err(SessionError::Conflict)
-            }
+            Err(StorageError::Conflict) => Err(self.lock_on_conflict()),
             result => result.map_err(SessionError::from),
         }
+    }
+
+    /// Locks the session because the stored vault is no longer the one it holds, and
+    /// records it; returns the error to report.
+    ///
+    /// ```ignore
+    /// return Err(self.lock_on_conflict());
+    /// ```
+    fn lock_on_conflict(&mut self) -> SessionError {
+        self.open = None;
+        self.record(Event::LockedOnConflict);
+        SessionError::Conflict
     }
 
     /// Records `event` in this vault's audit log. A failed write never fails the caller;

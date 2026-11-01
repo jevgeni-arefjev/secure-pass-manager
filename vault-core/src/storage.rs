@@ -290,16 +290,7 @@ impl FileStore {
     /// let file = self.open_vault_file(&alice)?;
     /// ```
     fn open_vault_file(&self, name: &Vaultname) -> Result<File, StorageError> {
-        let file = match open_no_follow(OpenOptions::new().read(true), &self.path(name)) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Err(StorageError::NotFound);
-            }
-            result => result.map_err(io_error)?,
-        };
-        let metadata = file.metadata().map_err(io_error)?;
-        if !metadata.is_file() || metadata.len() > MAX_VAULT_FILE_LEN {
-            return Err(StorageError::NotAVault);
-        }
+        let (file, metadata) = open_vault_file_at(&self.path(name))?;
         if is_loosely_permitted(&metadata) {
             tracing::warn!(event = "vault_file_permissions_loose", vaultname = %name);
         }
@@ -313,16 +304,7 @@ impl FileStore {
     /// ```
     fn read_vault(&self, name: &Vaultname) -> Result<SealedVault, StorageError> {
         self.check_vault_file(name)?;
-        let file = self.open_vault_file(name)?;
-        let mut bytes = Vec::new();
-        // The bound also covers a file that grows after its length was checked.
-        file.take(MAX_VAULT_FILE_LEN + 1)
-            .read_to_end(&mut bytes)
-            .map_err(io_error)?;
-        if bytes.len() as u64 > MAX_VAULT_FILE_LEN {
-            return Err(StorageError::NotAVault);
-        }
-        decode_vault(bytes)
+        read_sealed(self.open_vault_file(name)?)
     }
 
     /// The revision of the vault stored under `name`, read from its header alone. Used
@@ -473,6 +455,50 @@ pub(crate) fn existing_vault_home(dir: &Path, name: &Vaultname) -> Result<PathBu
     Ok(home)
 }
 
+/// Opens the vault file at `path` for reading and returns it with its metadata. Used
+/// for vault files in a vault home and for backups (see [`crate::backup`]).
+///
+/// Security: opened with `O_NOFOLLOW` and checked on the opened file, so it can't be
+/// swapped for a symlink or special file (e.g. a FIFO, which would block a read)
+/// between check and read; such files and files over [`MAX_VAULT_FILE_LEN`] are
+/// refused as [`StorageError::NotAVault`].
+///
+/// ```ignore
+/// let (file, metadata) = storage::open_vault_file_at(&path)?;
+/// ```
+pub(crate) fn open_vault_file_at(path: &Path) -> Result<(File, Metadata), StorageError> {
+    let file = match open_no_follow(OpenOptions::new().read(true), path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(StorageError::NotFound);
+        }
+        result => result.map_err(io_error)?,
+    };
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_file() || metadata.len() > MAX_VAULT_FILE_LEN {
+        return Err(StorageError::NotAVault);
+    }
+    Ok((file, metadata))
+}
+
+/// Reads the whole vault file `file` (opened by [`open_vault_file_at`]) and splits it
+/// into its strictly parsed header and its body.
+///
+/// ```ignore
+/// let (file, _) = storage::open_vault_file_at(&path)?;
+/// let sealed = storage::read_sealed(file)?;
+/// ```
+pub(crate) fn read_sealed(file: File) -> Result<SealedVault, StorageError> {
+    let mut bytes = Vec::new();
+    // The bound also covers a file that grows after its length was checked.
+    file.take(MAX_VAULT_FILE_LEN + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > MAX_VAULT_FILE_LEN {
+        return Err(StorageError::NotAVault);
+    }
+    decode_vault(bytes)
+}
+
 /// Splits the bytes of a vault file into its header and body.
 ///
 /// Security: these bytes are untrusted; [`Header::decode`] is their only parser. The
@@ -501,10 +527,25 @@ fn decode_vault(mut bytes: Vec<u8>) -> Result<SealedVault, StorageError> {
 /// temp.persist(home.join(VAULT_FILE))?;
 /// ```
 fn write_temp(home: &Path, sealed: &SealedVault) -> io::Result<NamedTempFile> {
+    write_temp_named(home, TEMP_PREFIX, sealed)
+}
+
+/// Writes `sealed` as `header ‖ body` to a new temp file `<prefix><random>.tmp` in the
+/// directory `dir` and fsyncs it, like [`write_temp`]. Backups use their own `prefix`,
+/// so a save's cleanup never mistakes one for its own leftovers.
+///
+/// ```ignore
+/// let temp = storage::write_temp_named(&dir, ".vault-backup-", &sealed)?;
+/// ```
+pub(crate) fn write_temp_named(
+    dir: &Path,
+    prefix: &str,
+    sealed: &SealedVault,
+) -> io::Result<NamedTempFile> {
     let mut temp = tempfile::Builder::new()
-        .prefix(TEMP_PREFIX)
+        .prefix(prefix)
         .suffix(TEMP_SUFFIX)
-        .tempfile_in(home)?;
+        .tempfile_in(dir)?;
     temp.write_all(&sealed.header.encode())?;
     temp.write_all(&sealed.body)?;
     temp.as_file().sync_all()?;
@@ -593,7 +634,7 @@ pub(crate) fn open_no_follow(options: &OpenOptions, path: &Path) -> io::Result<F
 /// ```ignore
 /// fs::metadata(&dir).map_err(io_error)?;
 /// ```
-fn io_error(_: io::Error) -> StorageError {
+pub(crate) fn io_error(_: io::Error) -> StorageError {
     StorageError::Io
 }
 
@@ -674,7 +715,7 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 /// temp.persist(path)?;
 /// sync_dir_after_commit(&home);
 /// ```
-fn sync_dir_after_commit(dir: &Path) {
+pub(crate) fn sync_dir_after_commit(dir: &Path) {
     if sync_dir(dir).is_err() {
         tracing::warn!(event = "vault_directory_sync_failed");
     }

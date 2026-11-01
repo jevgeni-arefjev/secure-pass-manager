@@ -120,6 +120,11 @@ pub enum ShellCommand {
     Gen(Gen),
     /// Change the master password
     Passwd,
+    /// Write an encrypted copy of this vault to a new file
+    Backup {
+        /// File to create; it must not exist yet and must be outside the vault directory
+        path: PathBuf,
+    },
     /// Show the audit log, newest first
     Log {
         /// How many audit events to show (1-1000)
@@ -147,6 +152,6 @@ pub enum ShellCommand {
 pub fn is_shell_only(name: &str) -> bool {
     matches!(
         name,
-        "get" | "save" | "list" | "rm" | "passwd" | "log" | "lock" | "exit" | "quit"
+        "get" | "save" | "list" | "rm" | "passwd" | "backup" | "log" | "lock" | "exit" | "quit"
     )
 }

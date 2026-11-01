@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested; backup is still a stub, and the web front end is not started.
+> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested; the web front end is not started.
 
 ## Project layout
 
@@ -23,6 +23,7 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── tests/storage.rs    # storage module behaviour, through its public API
 │   ├── tests/session.rs    # session module behaviour, through its public API
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
+│   ├── tests/backup.rs     # backup destinations and Session::backup, through the public API
 │   ├── tests/generator.rs  # password generator behaviour, through its public API
 │   └── src/
 │       ├── lib.rs
@@ -32,7 +33,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── storage.rs      # Storage: one vault home per vaultname holding `secrets.vault`, a flat file (header ‖ encrypted body); atomic, locked, revision-checked saves (ADR-0009, ADR-0011)
 │       ├── storage/        # vaultname validation
 │       ├── audit.rs        # Audit log: typed events as JSON Lines in `audit.log` per vault home, at most a title, rotated at 1 MiB, fail-open (ADR-0010)
-│       ├── backup.rs       # Backup: ciphertext-only export of a user's vault
+│       ├── backup.rs       # Backup: ciphertext-only copy of a vault file to a new file outside the vault directory, verified, never overwriting
 │       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once, records audit events (single user in MVP)
 │       └── session/        # secret model + field validation, JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
@@ -43,7 +44,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── lib.rs
 │       ├── args.rs         # command grammar (clap): `vault` arguments and vault shell commands
 │       ├── shell.rs        # init/unlock (3 tries), the vault shell loop, auto-lock watcher, termination signals
-│       ├── commands.rs     # get, save, list, rm, gen, passwd, log, lock; prompts first, then the session
+│       ├── commands.rs     # get, save, list, rm, gen, passwd, backup, log, lock; prompts first, then the session
 │       ├── clipboard.rs    # `--copy`: excluded from clipboard history, cleared after 20 s, on lock and exit
 │       ├── terminal.rs     # Terminal trait (fakeable in tests) and the real stdin/stdout one; in-memory history only
 │       ├── terminal/       # masked prompt: one `*` per character, zeroizing buffer (ADR-0008)
@@ -117,7 +118,8 @@ All commands are listed in [`secure-password-manager.md` §5](secure-password-ma
 - Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
 - The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused.
 - The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
-- `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes. It holds titles in plaintext but never a field value.
+- `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes, backups. It holds titles in plaintext but never a field value.
+- `backup <path>` writes an encrypted copy of the vault file to a new file outside the vault directory, e.g. `backup /media/usb/alice.vault`; it never overwrites. To restore, create a vault home and put the backup in it: `mkdir -m 700 ~/.local/share/secure-pass-manager/vaults/alice && cp /media/usb/alice.vault ~/.local/share/secure-pass-manager/vaults/alice/secrets.vault`, then `vault unlock alice`. Any vaultname works.
 - `--copy` needs a display (X11 or Wayland on Linux); over plain SSH it reports that the clipboard is not available.
 - If the process is killed by a signal while waiting at the `vault>` prompt, the vault is wiped, but the terminal can be left in raw mode; type `reset` to fix it.
 

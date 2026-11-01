@@ -213,6 +213,9 @@ where
         };
         let time = record.time.with_timezone(tz).format("%Y-%m-%d %H:%M:%S");
         let _ = write!(out, "{time}  {}", describe(&record.event));
+        if let Event::BackupCreated { revision } = record.event {
+            let _ = write!(out, " (revision {revision})");
+        }
         if let Some(title) = record.event.title() {
             let _ = write!(out, " '{}'", escape(title, false).as_str());
         }
@@ -242,6 +245,7 @@ fn describe(event: &Event) -> &'static str {
         Event::MasterPasswordChangeFailed => {
             "master password change failed (wrong current password)"
         }
+        Event::BackupCreated { .. } => "backup created",
     }
 }
 

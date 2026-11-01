@@ -96,6 +96,12 @@ pub enum Event {
     MasterPasswordChanged,
     /// A master password change was refused: the current master password was wrong.
     MasterPasswordChangeFailed,
+    /// A backup of the vault was written and verified. Its destination path is not
+    /// recorded.
+    BackupCreated {
+        /// The revision of the vault the backup holds.
+        revision: u64,
+    },
 }
 
 impl Event {
@@ -120,7 +126,8 @@ impl Event {
             | Self::LockedOnConflict
             | Self::TerminatedBySignal
             | Self::MasterPasswordChanged
-            | Self::MasterPasswordChangeFailed => None,
+            | Self::MasterPasswordChangeFailed
+            | Self::BackupCreated { .. } => None,
         }
     }
 }

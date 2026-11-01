@@ -22,6 +22,10 @@ _Avoid_: vault folder, data dir
 The directory inside the vault directory that is named after a vaultname and holds that vault's file and its audit log; renaming it renames the vault.
 _Avoid_: vault subdirectory, user directory
 
+**Backup**:
+A copy of a vault's encrypted file, made from a session on that vault, that can be restored under any vaultname; it never holds anything decrypted.
+_Avoid_: export (suggests plaintext), snapshot
+
 **Master password**:
 The password that unlocks a vault, and the only way to open it.
 _Avoid_: vault password

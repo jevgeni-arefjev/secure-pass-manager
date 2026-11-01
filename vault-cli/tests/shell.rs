@@ -787,9 +787,82 @@ fn help_in_the_shell_lists_the_commands() {
         .iter()
         .find(|o| o.contains("passwd"))
         .expect("help printed");
-    for command in ["get", "save", "list", "rm", "gen", "lock"] {
+    for command in ["get", "save", "list", "rm", "gen", "backup", "lock"] {
         assert!(help.contains(command), "{command} missing from help");
     }
+}
+
+// --- backup ---------------------------------------------------------------------------
+
+#[test]
+fn backup_writes_the_vault_file_and_says_which_revision_it_holds() {
+    let fx = Fixture::with_alice();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let path = elsewhere.path().join("alice.vault");
+    let (exit, t) = fx.shell(with_github(vec![
+        line(&format!("backup {}", path.display())),
+        line("lock"),
+    ]));
+    assert_eq!(exit, Exit::Success, "{}", t.stderr());
+    assert!(t.stdout().contains(&format!(
+        "Backup written to {} (revision 1). It opens with the master password this vault has now.",
+        path.display()
+    )));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        std::fs::read(fx.dir.path().join("alice/secrets.vault")).unwrap()
+    );
+}
+
+#[test]
+fn backup_refuses_an_existing_file_and_the_shell_goes_on() {
+    let fx = Fixture::with_alice();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let path = elsewhere.path().join("taken");
+    std::fs::write(&path, b"keep me").unwrap();
+    let (exit, t) = fx.shell(vec![
+        line(&format!("backup {}", path.display())),
+        line("lock"),
+    ]);
+    assert_eq!(exit, Exit::Success);
+    assert_eq!(
+        t.stderr(),
+        "vault: something already exists at the backup path; a backup never overwrites"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+}
+
+#[test]
+fn backup_refuses_a_path_inside_the_vault_directory() {
+    let fx = Fixture::with_alice();
+    let path = fx.dir.path().join("alice.vault");
+    let (_, t) = fx.shell(vec![line(&format!("backup {}", path.display()))]);
+    assert_eq!(
+        t.stderr(),
+        "vault: a backup can't be written inside the vault directory"
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn backup_is_shown_in_the_log_with_its_revision() {
+    let fx = Fixture::with_alice();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let path = elsewhere.path().join("alice.vault");
+    let (_, t) = fx.shell(vec![
+        line(&format!("backup {}", path.display())),
+        line("log"),
+    ]);
+    assert_eq!(logged_events(&t)[0], "backup created (revision 0)");
+    assert!(!t.out.last().unwrap().contains("alice.vault"));
+}
+
+#[test]
+fn backup_outside_the_vault_shell_points_to_unlock() {
+    let fx = Fixture::with_alice();
+    let (exit, t) = fx.run(&["backup", "/tmp/alice.vault"], vec![]);
+    assert_eq!(exit, Exit::Usage);
+    assert!(t.stderr().contains("works inside the vault shell"));
 }
 
 // --- log ------------------------------------------------------------------------------

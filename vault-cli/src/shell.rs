@@ -13,7 +13,7 @@
 //!   without a session.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -195,7 +195,7 @@ fn open_vault(
         Ok(store) => store,
         Err(err) => return fail(terminal, &err),
     };
-    let audit: Arc<dyn AuditSink> = Arc::new(FileSink::new(dir));
+    let audit: Arc<dyn AuditSink> = Arc::new(FileSink::new(dir.clone()));
     let vaultname = match &open.vaultname {
         Some(name) => name.trim().to_owned(),
         None => match terminal.read_line("Vaultname: ") {
@@ -217,7 +217,7 @@ fn open_vault(
         Opening::Unlock => unlock(terminal, &store, &vaultname, &config),
     };
     match session {
-        Ok(session) => vault_shell(terminal, env, session, open.idle_timeout),
+        Ok(session) => vault_shell(terminal, env, session, &dir, open.idle_timeout),
         Err(exit) => exit,
     }
 }
@@ -294,12 +294,13 @@ fn unlock(
 /// session, then locks the vault and clears the clipboard.
 ///
 /// ```ignore
-/// vault_shell(terminal, env, session, 5)
+/// vault_shell(terminal, env, session, &vault_dir, 5)
 /// ```
 fn vault_shell(
     terminal: &mut dyn Terminal,
     env: &Env,
     session: Session<FileStore>,
+    vault_dir: &Path,
     idle_minutes: u64,
 ) -> Exit {
     terminal.print(&format!(
@@ -349,7 +350,7 @@ fn vault_shell(
                 continue;
             }
         };
-        match commands::execute(command, terminal, &session) {
+        match commands::execute(command, terminal, &session, vault_dir) {
             Ok(Flow::Continue) => {}
             Ok(Flow::Lock) => break Exit::Success,
             Err(err) => {
