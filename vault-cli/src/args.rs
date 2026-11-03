@@ -17,6 +17,9 @@ pub const DEFAULT_LOG_LIMIT: u16 = 20;
 
 /// `vault`: a local password manager with one encrypted vault per person.
 ///
+/// The help text is set explicitly, so this doc comment (and its example) stays out of
+/// `vault --help`.
+///
 /// ```
 /// use clap::Parser;
 /// use vault_cli::args::{Cli, Command};
@@ -24,7 +27,12 @@ pub const DEFAULT_LOG_LIMIT: u16 = 20;
 /// assert!(matches!(cli.command, Command::Unlock(_)));
 /// ```
 #[derive(Debug, Parser)]
-#[command(name = "vault", version, about)]
+#[command(
+    name = "vault",
+    version,
+    about = "`vault`: a local password manager with one encrypted vault per person.",
+    long_about = None
+)]
 pub struct Cli {
     /// Directory holding the vaults [default: the platform data directory]
     #[arg(long, global = true, value_name = "PATH")]
