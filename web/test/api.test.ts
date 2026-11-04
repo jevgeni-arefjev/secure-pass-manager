@@ -147,3 +147,19 @@ test("getSecret asks for the percent-encoded title; a 404 is an error, not a loc
   assert.equal(calls[0]?.url, "/api/secrets/my%20bank%20%2F%20savings");
   assert.equal(locked, false);
 });
+
+test("revealField posts one field name with the CSRF token and returns that one value", async () => {
+  const ok = fakeFetch(200, SESSION);
+  let current = ok.fetch;
+  const api = new Api((url, init) => current(url, init), () => {});
+  await api.unlock({ vaultname: "alice", master_password: "pw" });
+  const revealed = fakeFetch(200, { value: "s3cret!" });
+  current = revealed.fetch;
+
+  assert.equal(await api.revealField("my bank / savings", "recovery code"), "s3cret!");
+  const call = revealed.calls[0]!;
+  assert.equal(call.url, "/api/secrets/my%20bank%20%2F%20savings/reveal");
+  assert.equal(call.init.method, "POST");
+  assert.equal(headers(call)["x-csrf-token"], SESSION.csrf_token);
+  assert.deepEqual(JSON.parse(String(call.init.body)), { field: "recovery code" });
+});

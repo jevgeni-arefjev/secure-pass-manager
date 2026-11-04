@@ -264,6 +264,19 @@ impl Unlocked {
             .unwrap()
     }
 
+    /// A same-origin `POST path` with `body` as JSON, this session's cookie and CSRF
+    /// token.
+    ///
+    /// ```text
+    /// let response = app.send(alice.post_json("/api/secrets/GitHub/reveal", &json!({"field": "password"}))).await;
+    /// ```
+    pub fn post_json(&self, path: &str, body: &Value) -> Request<Body> {
+        self.authorize(api(Method::POST, path))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
     /// `GET path` with this session's cookie.
     ///
     /// ```text

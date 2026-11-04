@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets and view one with hidden fields masked; revealing and editing secrets come next.
+> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, and reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s); editing secrets comes next.
 
 ## Project layout
 
@@ -59,6 +59,7 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── tests/app.rs        # the HTTP app in-process (tower `oneshot`): security headers, Host check, request logs, "client not built" page
 │   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, KDF limiter (503), strict parsing, log contents
 │   ├── tests/secrets.rs    # list and detail: no hidden values, titles in URLs (percent-encoded, unusual characters), 404, one vault per session
+│   ├── tests/reveal.rs     # reveal: one hidden value per request, CSRF, 404 for unknown title/field, plain fields refused, audit event, nothing in logs
 │   ├── tests/tls.rs        # certificate loading, self-signed generation, 0600 cache and reuse
 │   ├── tests/args.rs       # server flags, through the public `args` API
 │   └── src/
@@ -70,7 +71,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── middleware.rs   # request log (method, route template, status, latency, session hash), Host and Origin checks, security headers and CSP
 │       ├── api.rs          # `/api` routes and JSON errors (`{"error"}`, optional `"field"`)
 │       ├── api/vault.rs    # POST /api/vaults (create), /api/unlock, /api/lock; GET /api/session
-│       ├── api/secrets.rs  # GET /api/secrets (list), /api/secrets/{title} (detail): hidden fields named, never sent
+│       ├── api/secrets.rs  # GET /api/secrets (list), /api/secrets/{title} (detail): hidden fields named, never sent; POST /api/secrets/{title}/reveal: one hidden field, audited
 │       ├── auth.rs         # `__Host-session` cookie; extractor resolving the session and checking the CSRF token; access to that session's vault only
 │       ├── sessions.rs     # session registry: SHA-256(session ID) → vault session, CSRF token, creation time, idle timeout
 │       ├── kdf_limiter.rs  # unlock/create on the blocking pool, 2 at once plus a short queue, else 503
@@ -81,7 +82,7 @@ It is a password manager with one shared Rust core and two front ends:
     ├── tsconfig.json       # strict type-checking of src/; tsconfig.test.json adds test/ and emits to .test-build/
     ├── scripts/build.mjs   # `npm run build`: esbuild bundle + static files into vault-web/assets
     ├── static/             # index.html and app.css (no inline scripts or styles)
-    ├── src/                # main.ts (create/unlock/list/detail pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked), forms.ts, secrets.ts (search, title paths), text.ts (control/bidi escapes), url.ts (http/https link allowlist)
+    ├── src/                # main.ts (create/unlock/list/detail pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked), forms.ts, secrets.ts (search, title paths), reveal.ts (30 s reveal, 20 s clipboard clear), text.ts (control/bidi escapes), url.ts (http/https link allowlist)
     └── test/               # node:test tests of the pure helpers
 ```
 
@@ -96,7 +97,7 @@ How the modules map to the specs:
 | Session | `vault-core::session` (single user in MVP) | both |
 | Password generator | `vault-core::generator` | both |
 | CLI | `vault-cli` | ICS0022 |
-| Web server + client | `vault-web`, `web/` *(create, unlock, lock, list, view)* | ICS0027 |
+| Web server + client | `vault-web`, `web/` *(create, unlock, lock, list, view, reveal)* | ICS0027 |
 
 ## Build and run
 

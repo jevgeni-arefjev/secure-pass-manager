@@ -6,18 +6,22 @@
 // throw at runtime. Field values are shown through `displayText`, and a secret's URL
 // is a link only for http/https (`safeHref`). Vault data and the CSRF token live in
 // memory only; any 401 wipes them and shows the unlock page. Master password inputs
-// are cleared once submitted. Hidden fields never reach the browser on these pages:
-// they are shown as a mask.
+// are cleared once submitted. Hidden fields are masked; one reaches the browser only
+// when Reveal or Copy asks for it (an audited request), and then lives only in the
+// element showing it (until hidden, the page is left, or 30 s) or in the clipboard
+// (cleared after 20 s if possible).
 
 import {
   Api,
   ApiError,
+  PASSWORD_FIELD,
   type SecretDetail,
   type SecretSummary,
   type SessionInfo,
   type UnlockRequest,
 } from "./api.js";
 import { checkNewMasterPassword, parseIdleTimeout } from "./forms.js";
+import { copyThenClear, CLEAR_CLIPBOARD_AFTER_MS, RevealedField } from "./reveal.js";
 import { filterSecrets } from "./secrets.js";
 import { displayText } from "./text.js";
 import { safeHref } from "./url.js";
@@ -33,6 +37,9 @@ const MASK = "••••••••";
 
 /** Bumped on every page change, so a response for an earlier page is dropped. */
 let pageGeneration = 0;
+
+/** What to do when the current page is left, e.g. mask revealed values. */
+let leaveHandlers: (() => void)[] = [];
 
 /**
  * The open session; set from unlock to lock, i.e. while vault data may be on screen.
@@ -109,8 +116,35 @@ function button(text: string, type: "button" | "submit"): HTMLButtonElement {
  * render(textElement("h1", "Vault"));
  */
 function render(...children: Node[]): void {
+  leavePage();
   pageGeneration += 1;
   root?.replaceChildren(...children);
+}
+
+/**
+ * Runs and forgets the current page's leave handlers; on every page change, and when
+ * the browser leaves or freezes the page.
+ *
+ * @example
+ * window.addEventListener("pagehide", leavePage);
+ */
+function leavePage(): void {
+  const handlers = leaveHandlers;
+  leaveHandlers = [];
+  for (const handler of handlers) {
+    handler();
+  }
+}
+
+/**
+ * Runs `handler` when the page now shown is left. Register only after the page is
+ * rendered, or rendering it runs the handler at once.
+ *
+ * @example
+ * onLeave(() => field.hide());
+ */
+function onLeave(handler: () => void): void {
+  leaveHandlers.push(handler);
 }
 
 /**
@@ -499,8 +533,9 @@ function renderDetail(secret: SecretDetail): void {
   if (secret.username !== null) {
     row("Username", text(secret.username));
   }
+  const hiddenFields: RevealedField[] = [];
   if (secret.has_password) {
-    row("Password", masked());
+    row("Password", hiddenValue(secret.title, PASSWORD_FIELD, hiddenFields));
   }
   if (secret.url !== null) {
     row("URL", urlValue(secret.url));
@@ -514,7 +549,10 @@ function renderDetail(secret: SecretDetail): void {
     row("Tags", tagList(secret.tags));
   }
   for (const custom of secret.custom_fields) {
-    row(displayText(custom.name, false), custom.hidden ? masked() : text(custom.value));
+    row(
+      displayText(custom.name, false),
+      custom.hidden ? hiddenValue(secret.title, custom.name, hiddenFields) : text(custom.value),
+    );
   }
   row("Created", text(timestamp(secret.created_at)));
   row("Updated", text(timestamp(secret.updated_at)));
@@ -523,7 +561,97 @@ function renderDetail(secret: SecretDetail): void {
   back.className = "link";
   back.addEventListener("click", () => showList());
   vaultPage(back, textElement("h2", displayText(secret.title, false)), fields);
+  onLeave(() => {
+    for (const field of hiddenFields) {
+      field.hide();
+    }
+  });
   back.focus();
+}
+
+/**
+ * A hidden field of the secret titled `title`: its mask with Reveal/Hide and Copy
+ * buttons, and a status line. `field` is {@link PASSWORD_FIELD} or the custom field's name. The
+ * field's {@link RevealedField} is added to `fields`, for masking when the page is left.
+ *
+ * Security: each Reveal and each Copy fetches the one value anew (an audited request);
+ * a response arriving after the page changed is dropped. The revealed value goes only
+ * into the element showing it, or only to the clipboard.
+ *
+ * @example
+ * row("Password", hiddenValue("GitHub", PASSWORD_FIELD, hiddenFields));
+ */
+function hiddenValue(title: string, field: string, fields: RevealedField[]): HTMLElement {
+  const value = masked();
+  const toggle = button("Reveal", "button");
+  const copy = button("Copy", "button");
+  const status = textElement("span", "");
+  status.className = "hint";
+  status.setAttribute("role", "status");
+  const onScreen = new RevealedField((revealed) => {
+    if (revealed === null) {
+      value.textContent = MASK;
+      value.className = "masked";
+      value.setAttribute("aria-label", "hidden");
+      toggle.textContent = "Reveal";
+    } else {
+      value.textContent = displayText(revealed, false);
+      value.className = "revealed";
+      value.removeAttribute("aria-label");
+      toggle.textContent = "Hide";
+    }
+  });
+  fields.push(onScreen);
+  /**
+   * Asks the server to reveal the field and passes the value to `use`, unless the page
+   * changed meanwhile; shows a failure in the status line. `buttonUsed` is disabled
+   * while waiting.
+   *
+   * @example
+   * fetchValue(toggle, (revealed) => onScreen.reveal(revealed));
+   */
+  const fetchValue = (buttonUsed: HTMLButtonElement, use: (revealed: string) => Promise<void> | void): void => {
+    const generation = pageGeneration;
+    buttonUsed.disabled = true;
+    status.textContent = "";
+    api
+      .revealField(title, field)
+      .then(async (revealed) => {
+        if (generation === pageGeneration) {
+          await use(revealed);
+        }
+      })
+      .catch((err: unknown) => {
+        if (generation === pageGeneration) {
+          status.textContent = err instanceof ApiError ? `Failed: ${err.message}.` : "Failed.";
+        }
+      })
+      .finally(() => {
+        buttonUsed.disabled = false;
+      });
+  };
+  toggle.addEventListener("click", () => {
+    if (onScreen.isRevealed) {
+      onScreen.hide();
+    } else {
+      fetchValue(toggle, (revealed) => onScreen.reveal(revealed));
+    }
+  });
+  copy.addEventListener("click", () => {
+    const clipboard = navigator.clipboard as Clipboard | undefined;
+    if (clipboard === undefined) {
+      status.textContent = "Copying is not available in this browser.";
+      return;
+    }
+    fetchValue(copy, async (revealed) => {
+      await copyThenClear(revealed, clipboard, () => document.hasFocus());
+      status.textContent = `Copied; cleared in ${CLEAR_CLIPBOARD_AFTER_MS / 1000} s if this page has focus.`;
+    });
+  });
+  const container = document.createElement("span");
+  container.className = "hidden-field";
+  container.append(value, toggle, copy, status);
+  return container;
 }
 
 /**
@@ -570,6 +698,8 @@ function urlValue(url: string): Node {
 function timestamp(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString();
 }
+
+window.addEventListener("pagehide", leavePage);
 
 if (root !== null) {
   api.session().then(showVault, () => showUnlock());

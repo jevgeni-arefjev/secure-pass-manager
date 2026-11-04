@@ -85,6 +85,19 @@ impl ApiError {
     pub(crate) const SECRET_NOT_FOUND: Self =
         Self::fixed(StatusCode::NOT_FOUND, "no secret with this title");
 
+    /// The secret has no field with the requested name (or no password). Never echoes
+    /// the name.
+    pub(crate) const FIELD_NOT_FOUND: Self =
+        Self::fixed(StatusCode::NOT_FOUND, "no field with this name");
+
+    /// A reveal asked for a field that isn't hidden; its value is in the detail view.
+    pub(crate) const NOT_HIDDEN: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        message: Cow::Borrowed("not a hidden field"),
+        field: Some("field"),
+        ends_session: false,
+    };
+
     /// Create was asked for a vaultname that already has a vault.
     pub(crate) const VAULTNAME_TAKEN: Self = Self::fixed(StatusCode::CONFLICT, "vaultname taken");
 
@@ -168,5 +181,6 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/session", get(vault::session))
         .route("/secrets", get(secrets::list))
         .route("/secrets/{title}", get(secrets::detail))
+        .route("/secrets/{title}/reveal", post(secrets::reveal))
         .fallback(|| async { ApiError::NOT_FOUND })
 }

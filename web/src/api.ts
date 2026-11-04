@@ -61,6 +61,14 @@ export interface SecretDetail extends SecretFields {
   custom_fields: CustomFieldView[];
 }
 
+/** The field name a reveal request uses for a secret's password; no custom field can have it. */
+export const PASSWORD_FIELD = "password";
+
+/** The body of a reveal response: the one hidden value asked for. */
+interface Revealed {
+  value: string;
+}
+
 /** Shown when a failed response carries no usable `{"error": ...}` body. */
 const GENERIC_ERROR = "request failed";
 
@@ -189,6 +197,21 @@ export class Api {
    */
   async getSecret(title: string): Promise<SecretDetail> {
     return (await this.#request("GET", secretPath(title))) as SecretDetail;
+  }
+
+  /**
+   * The value of one hidden field of the secret titled `title`: `"password"` or a
+   * hidden custom field's name ({@link PASSWORD_FIELD} for the password). The server records each reveal in the audit log.
+   *
+   * Security: returns the value without keeping it; the caller decides where it lives
+   * and for how long. An unknown title or field rejects with a 404 {@link ApiError}.
+   *
+   * @example
+   * const password = await api.revealField("GitHub", PASSWORD_FIELD);
+   */
+  async revealField(title: string, field: string): Promise<string> {
+    const body = (await this.#request("POST", `${secretPath(title)}/reveal`, { field })) as Revealed;
+    return body.value;
   }
 
   /**

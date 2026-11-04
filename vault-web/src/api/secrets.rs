@@ -1,5 +1,5 @@
-//! Reading secrets: `GET /api/secrets` (the list) and `GET /api/secrets/{title}` (one
-//! secret, masked).
+//! Reading secrets: `GET /api/secrets` (the list), `GET /api/secrets/{title}` (one
+//! secret, masked) and `POST /api/secrets/{title}/reveal` (one hidden field).
 //!
 //! Security:
 //! - Every handler reads only the vault its session unlocked ([`CurrentSession`]); no
@@ -7,17 +7,22 @@
 //! - Neither view ever carries a hidden value (password or hidden custom field): those
 //!   are named only. The list leaves out notes and plain custom field values too, so it
 //!   holds nothing beyond what identifies each secret.
+//! - A hidden value leaves only through the reveal handler: one field per request,
+//!   behind the CSRF token, recorded in the audit log.
 
 use axum::Json;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
+use axum::response::{IntoResponse, Response};
 use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use vault_core::session::{CustomField, FieldValue, Secret, SessionError};
+use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::api::ApiError;
 use crate::auth::CurrentSession;
+use crate::json::StrictJson;
 
 /// The body of `GET /api/secrets`.
 #[derive(Serialize)]
@@ -234,6 +239,102 @@ pub(crate) async fn detail(
         })
         .map_err(read_error)?;
     Ok(Json(detail))
+}
+
+/// The field name standing for a secret's password in a reveal request. No custom
+/// field can have it: `vault-core` refuses custom fields named like a standard field.
+const PASSWORD_FIELD: &str = "password";
+
+/// The body of `POST /api/secrets/{title}/reveal`: which one field to reveal.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RevealRequest {
+    field: String,
+}
+
+/// The body of a reveal response: the one hidden value asked for.
+///
+/// Security: no `Debug`; built only while the response is serialized, from a
+/// zeroizing copy of the value.
+#[derive(Serialize)]
+struct Revealed<'a> {
+    value: &'a str,
+}
+
+/// Why a reveal returned no value; failing the reveal closure records no audit event.
+enum RevealError {
+    Session(SessionError),
+    FieldNotFound,
+    NotHidden,
+}
+
+impl From<SessionError> for RevealError {
+    /// Wraps a session failure (locked, unknown title, ...).
+    ///
+    /// ```ignore
+    /// let err: RevealError = SessionError::SecretNotFound.into();
+    /// ```
+    fn from(err: SessionError) -> Self {
+        Self::Session(err)
+    }
+}
+
+/// `POST /api/secrets/{title}/reveal`: the value of one hidden field, `"password"` or
+/// a hidden custom field's exact name, of the secret titled `title` in the session's
+/// vault. Each success records a reveal audit event naming the title only.
+///
+/// Errors: 403 without the CSRF token; 404 for an unknown title or field (neither
+/// echoed); 400 with `"field": "field"` for a plain custom field.
+///
+/// Security: one value per request, read through `Session::reveal` so it is audited;
+/// the copy taken out of the vault is zeroized once serialized (the response bytes in
+/// hyper are beyond reach). The route template, not the title, is what gets logged.
+///
+/// ```text
+/// POST /api/secrets/GitHub/reveal {"field": "password"}   (cookie, X-CSRF-Token)
+/// 200 {"value": "s3cret!"}
+/// ```
+pub(crate) async fn reveal(
+    State(state): State<AppState>,
+    current: CurrentSession,
+    title: Result<Path<String>, PathRejection>,
+    StrictJson(request): StrictJson<RevealRequest>,
+) -> Result<Response, ApiError> {
+    let Path(title) = title.map_err(|_| ApiError::SECRET_NOT_FOUND)?;
+    let value = current
+        .with_live_vault(&state.sessions, |vault| {
+            Ok(vault.reveal(&title, |secret| hidden_value(secret, &request.field)))
+        })
+        .map_err(read_error)?
+        .map_err(|err| match err {
+            RevealError::Session(err) => read_error(err),
+            RevealError::FieldNotFound => ApiError::FIELD_NOT_FOUND,
+            RevealError::NotHidden => ApiError::NOT_HIDDEN,
+        })?;
+    Ok(Json(Revealed { value: &value }).into_response())
+}
+
+/// A zeroizing copy of the hidden field `field` of `secret`: its password for
+/// `"password"`, else the custom field with exactly that name.
+///
+/// ```ignore
+/// let value = hidden_value(secret, "recovery code")?;
+/// ```
+fn hidden_value(secret: &Secret, field: &str) -> Result<Zeroizing<String>, RevealError> {
+    let hidden = if field == PASSWORD_FIELD {
+        secret.password().ok_or(RevealError::FieldNotFound)?
+    } else {
+        let custom = secret
+            .custom_fields()
+            .iter()
+            .find(|custom| custom.name() == field)
+            .ok_or(RevealError::FieldNotFound)?;
+        match custom.value() {
+            FieldValue::Hidden(hidden) => hidden,
+            FieldValue::Plain(_) => return Err(RevealError::NotHidden),
+        }
+    };
+    Ok(Zeroizing::new(hidden.reveal().to_owned()))
 }
 
 /// Maps a failure reading the vault: locked is 401 (ending the session in the browser),
