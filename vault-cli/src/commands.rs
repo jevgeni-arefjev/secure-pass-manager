@@ -22,7 +22,9 @@ use chrono::Local;
 use vault_core::backup::Destination;
 use vault_core::crypto::MasterPassword;
 use vault_core::generator::{self, DEFAULT_PASSWORD_LENGTH, GeneratorError};
-use vault_core::session::{CustomField, HiddenValue, Saved, Secret, Session, SessionError};
+use vault_core::session::{
+    CustomField, HiddenValue, Saved, Secret, Session, SessionError, check_master_password,
+};
 use vault_core::storage::FileStore;
 
 use crate::args::ShellCommand;
@@ -157,7 +159,14 @@ pub(crate) fn execute(
     Ok(Flow::Continue)
 }
 
-/// Asks for a new master password twice; they must match.
+/// Asks for a new master password, checks its strength at once, then asks for it
+/// again; the two entries must match.
+///
+/// A weak password fails with `CommandError::Session(SessionError::WeakMasterPassword)`
+/// before the repeat prompt, so the user doesn't type it twice for nothing.
+///
+/// Security: both entries move straight into locked [`MasterPassword`]s (no extra plain
+/// copy) and are compared there.
 ///
 /// ```ignore
 /// let password = commands::new_master_password(terminal, "New master password: ")?;
@@ -167,11 +176,14 @@ pub(crate) fn new_master_password(
     prompt: &str,
 ) -> Result<MasterPassword, CommandError> {
     let mut first = terminal.read_hidden(prompt)?;
-    let second = terminal.read_hidden("Repeat master password: ")?;
-    if *first != *second {
+    let password = MasterPassword::new(std::mem::take(&mut *first));
+    check_master_password(&password).map_err(SessionError::from)?;
+    let mut repeat = terminal.read_hidden("Repeat master password: ")?;
+    let repeat = MasterPassword::new(std::mem::take(&mut *repeat));
+    if !password.matches(&repeat) {
         return Err(CommandError::PasswordsDiffer);
     }
-    Ok(MasterPassword::new(std::mem::take(&mut *first)))
+    Ok(password)
 }
 
 /// `get`: prints a secret masked, with `--show` unmasked, or with `--copy` copies its

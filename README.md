@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) is a skeleton: it serves the client over HTTPS with the security headers; vault creation, unlock and the secret pages come next.
+> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check); the secret pages come next.
 
 ## Project layout
 
@@ -55,7 +55,9 @@ It is a password manager with one shared Rust core and two front ends:
 ├── vault-web/              # `vault-web` binary: HTTPS server for the browser client
 │   ├── build.rs            # embeds assets/ into the binary at compile time; never runs npm
 │   ├── assets/             # client bundle from `npm run build` in web/ (not committed)
+│   ├── tests/common/       # shared test helpers: test app on a temp vault directory with a manual clock, request builders, log capture
 │   ├── tests/app.rs        # the HTTP app in-process (tower `oneshot`): security headers, Host check, request logs, "client not built" page
+│   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, KDF limiter (503), strict parsing, log contents
 │   ├── tests/tls.rs        # certificate loading, self-signed generation, 0600 cache and reuse
 │   ├── tests/args.rs       # server flags, through the public `args` API
 │   └── src/
@@ -64,15 +66,20 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── config.rs       # app config (the test seam): vault directory, clock, KDF limits, session lifetime, port, vault format, assets
 │       ├── args.rs         # flags: --bind, --vault-dir, --tls-cert/--tls-key
 │       ├── tls.rs          # rustls (ring) config from given PEM files or a cached self-signed localhost certificate (rcgen)
-│       ├── middleware.rs   # request log (method, route template, status, latency), Host check, security headers and CSP
-│       ├── api.rs          # `/api` routes and generic JSON errors
+│       ├── middleware.rs   # request log (method, route template, status, latency, session hash), Host and Origin checks, security headers and CSP
+│       ├── api.rs          # `/api` routes and JSON errors (`{"error"}`, optional `"field"`)
+│       ├── api/vault.rs    # POST /api/vaults (create), /api/unlock, /api/lock; GET /api/session
+│       ├── auth.rs         # `__Host-session` cookie; extractor resolving the session and checking the CSRF token
+│       ├── sessions.rs     # session registry: SHA-256(session ID) → vault session, CSRF token, creation time, idle timeout
+│       ├── kdf_limiter.rs  # unlock/create on the blocking pool, 2 at once plus a short queue, else 503
+│       ├── json.rs         # strict JSON bodies (64 KiB cap, objects only); master password straight into `MasterPassword`
 │       └── assets.rs       # embedded client bundle; "client not built" page
 └── web/                    # vanilla TypeScript browser client, bundled by esbuild into vault-web/assets
     ├── package.json        # scripts: build, check, test; pinned dev tools in package-lock.json
     ├── tsconfig.json       # strict type-checking of src/; tsconfig.test.json adds test/ and emits to .test-build/
     ├── scripts/build.mjs   # `npm run build`: esbuild bundle + static files into vault-web/assets
     ├── static/             # index.html and app.css (no inline scripts or styles)
-    ├── src/                # main.ts (DOM via createElement/textContent only), url.ts (http/https link allowlist)
+    ├── src/                # main.ts (create/unlock/vault pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked), forms.ts, url.ts (http/https link allowlist)
     └── test/               # node:test tests of the pure helpers
 ```
 
@@ -87,7 +94,7 @@ How the modules map to the specs:
 | Session | `vault-core::session` (single user in MVP) | both |
 | Password generator | `vault-core::generator` | both |
 | CLI | `vault-cli` | ICS0022 |
-| Web server + client | `vault-web`, `web/` *(skeleton)* | ICS0027 |
+| Web server + client | `vault-web`, `web/` *(create, unlock, lock)* | ICS0027 |
 
 ## Build and run
 
@@ -190,4 +197,4 @@ Open the printed URL. Without Node, `cargo run -p vault-web` still builds and ru
   ```
 
 - Only requests addressed to `localhost:<port>` or `127.0.0.1:<port>` are served (DNS rebinding defence); every response carries a strict CSP with Trusted Types, short HSTS (`max-age=300`) and `Cache-Control: no-store`.
-- The server refuses to start if it can't disable core dumps. Request logs (stderr) hold the method, route template, status and latency only.
+- The server refuses to start if it can't disable core dumps. Request logs (stderr) hold the method, route template, status, latency and a short hash of the session ID only.

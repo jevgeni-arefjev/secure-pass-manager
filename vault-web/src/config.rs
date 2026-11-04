@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use vault_core::session::{Clock, SystemClock};
+use vault_core::crypto::MasterPassword;
+use vault_core::session::{Clock, Session, SessionConfig, SessionError, SystemClock};
+use vault_core::storage::FileStore;
 
 use crate::assets::Assets;
 
@@ -18,7 +20,7 @@ pub const DEFAULT_KDF_CONCURRENCY: usize = 2;
 /// How many unlocks or creates may wait for a KDF slot before further ones get a 503.
 pub const DEFAULT_KDF_QUEUE: usize = 2;
 
-/// The vault format new vaults are created in (by vault creation, a later endpoint).
+/// The vault format new vaults are created in by `POST /api/vaults`.
 ///
 /// Security: [`CreateFormat::InsecureTest`] (cheap KDF, ADR-0005) exists only with the
 /// `insecure-test-kdf` feature, which only this crate's tests enable and release
@@ -31,6 +33,33 @@ pub enum CreateFormat {
     /// The test format with a cheap KDF. Tests only.
     #[cfg(feature = "insecure-test-kdf")]
     InsecureTest,
+}
+
+impl CreateFormat {
+    /// Creates vault `vaultname` in this format and returns it unlocked; see
+    /// `vault_core::session::Session::create`.
+    ///
+    /// Security: costs one Argon2id run (256 MiB in production); run it behind the KDF
+    /// limiter on the blocking pool.
+    ///
+    /// ```ignore
+    /// let session = config.create_format.create_session(store, "alice", &password, session_config)?;
+    /// ```
+    pub(crate) fn create_session(
+        self,
+        store: FileStore,
+        vaultname: &str,
+        password: &MasterPassword,
+        config: SessionConfig,
+    ) -> Result<Session<FileStore>, SessionError> {
+        match self {
+            Self::Production => Session::create(store, vaultname, password, config),
+            #[cfg(feature = "insecure-test-kdf")]
+            Self::InsecureTest => {
+                Session::create_insecure_for_tests(store, vaultname, password, config)
+            }
+        }
+    }
 }
 
 /// Limits on concurrent key derivation, so a burst of unlocks can't exhaust memory.

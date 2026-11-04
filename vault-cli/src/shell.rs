@@ -223,7 +223,8 @@ fn open_vault(
 }
 
 /// Creates a new vault, asking for its master password up to [`MAX_ATTEMPTS`] times
-/// (mismatched or too weak). Refuses at once if the vaultname is taken.
+/// (too weak, caught before the repeat prompt, or mismatched). Refuses at once if the
+/// vaultname is taken.
 ///
 /// ```ignore
 /// let session = create(terminal, &store, &name, &config)?;
@@ -245,19 +246,17 @@ fn create(
     for _ in 0..MAX_ATTEMPTS {
         let password = match commands::new_master_password(terminal, "New master password: ") {
             Ok(password) => password,
-            Err(CommandError::PasswordsDiffer) => {
-                terminal.print_error(&format!("vault: {}", CommandError::PasswordsDiffer));
+            Err(
+                err @ (CommandError::PasswordsDiffer
+                | CommandError::Session(SessionError::WeakMasterPassword(_))),
+            ) => {
+                terminal.print_error(&format!("vault: {err}"));
                 continue;
             }
             Err(err) => return Err(fail(terminal, &err)),
         };
-        match Session::create(store.clone(), &name.to_string(), &password, config()) {
-            Ok(session) => return Ok(session),
-            Err(SessionError::WeakMasterPassword(weak)) => {
-                terminal.print_error(&format!("vault: {weak}"));
-            }
-            Err(err) => return Err(fail(terminal, &err)),
-        }
+        return Session::create(store.clone(), &name.to_string(), &password, config())
+            .map_err(|err| fail(terminal, &err));
     }
     Err(Exit::Failure)
 }

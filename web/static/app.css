@@ -15,3 +15,53 @@ main {
   margin: 0 auto;
   padding: 2rem 1rem;
 }
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+input,
+button {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+}
+
+button.link {
+  margin-top: 1rem;
+  border: none;
+  background: none;
+  padding: 0;
+  color: LinkText;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.hint,
+.notice {
+  margin: 0;
+  opacity: 0.8;
+}
+
+.field-error,
+.form-error {
+  margin: 0;
+  color: #c62828;
+}
+
+.field-error:empty,
+.form-error:empty {
+  display: none;
+}

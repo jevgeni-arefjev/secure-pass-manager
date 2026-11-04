@@ -1,5 +1,5 @@
-//! Middleware applied to every request: request logging, the Host check and
-//! security headers on every response.
+//! Middleware applied to every request: request logging, the Host and Origin checks
+//! and security headers on every response.
 
 use std::time::Instant;
 
@@ -8,8 +8,9 @@ use axum::http::{HeaderName, HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use crate::AppConfig;
 use crate::api::ApiError;
+use crate::auth::{is_state_changing, request_session_id};
+use crate::{AppConfig, SessionTag};
 
 /// The Content Security Policy from `web-app-security.md`: same-origin code only, no
 /// inline script or style, no framing, and Trusted Types for every DOM sink.
@@ -90,11 +91,59 @@ pub(crate) async fn host_check(
     }
 }
 
-/// Logs one structured line per request: method, route template (e.g. `/{file}`),
-/// status and latency. Requests no route matched are logged as route `unmatched`.
+/// Refuses (403) a state-changing request (anything but GET, HEAD, OPTIONS) unless its
+/// `Origin` is `https://` plus the host it was sent to. Runs after [`host_check`], so
+/// that host is one of the server's own.
 ///
-/// Security: never logs the concrete path, query, headers (cookies, Host) or body,
-/// which can hold vaultnames, titles or session IDs.
+/// Security: one of the two CSRF defences (with the per-session token). It covers
+/// unlock and create too, which have no session yet, so another site can't log a
+/// victim into an attacker's vault.
+///
+/// ```ignore
+/// router.layer(axum::middleware::from_fn(origin_check))
+/// ```
+pub(crate) async fn origin_check(request: Request, next: Next) -> Response {
+    if is_state_changing(request.method()) && !is_same_origin(&request) {
+        return ApiError::CROSS_ORIGIN.into_response();
+    }
+    next.run(request).await
+}
+
+/// Whether `request`'s `Origin` is `https://<the host it was sent to>`, ignoring ASCII
+/// case. `false` without an `Origin` header.
+///
+/// ```ignore
+/// assert!(is_same_origin(&request)); // Host: localhost:8443, Origin: https://localhost:8443
+/// ```
+fn is_same_origin(request: &Request) -> bool {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(|authority| authority.as_str())
+        });
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|origin| origin.strip_prefix("https://"));
+    match (host, origin) {
+        (Some(host), Some(origin)) => origin.eq_ignore_ascii_case(host),
+        _ => false,
+    }
+}
+
+/// Logs one structured line per request: method, route template (e.g. `/{file}`),
+/// status, latency and a short hash of the session ID (the one a response opened, else
+/// the request cookie's; `-` for none). Requests no route matched are logged as route
+/// `unmatched`.
+///
+/// Security: never logs the concrete path, query, headers (cookies, Host), body or
+/// session ID, which can hold vaultnames, titles or credentials.
 ///
 /// ```ignore
 /// router.layer(axum::middleware::from_fn(request_log))
@@ -105,13 +154,21 @@ pub(crate) async fn request_log(request: Request, next: Next) -> Response {
         .extensions()
         .get::<MatchedPath>()
         .map_or_else(|| "unmatched".to_owned(), |path| path.as_str().to_owned());
+    let request_session = request_session_id(request.headers()).map(|id| id.key().tag());
     let started = Instant::now();
     let response = next.run(request).await;
+    let session = response
+        .extensions()
+        .get::<SessionTag>()
+        .map(|tag| tag.0.clone())
+        .or(request_session)
+        .unwrap_or_else(|| "-".to_owned());
     tracing::info!(
         method = %method,
         route = %route,
         status = response.status().as_u16(),
         latency_ms = started.elapsed().as_secs_f64() * 1000.0,
+        session = %session,
         "request"
     );
     response

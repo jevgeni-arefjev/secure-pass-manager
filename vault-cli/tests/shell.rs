@@ -414,8 +414,7 @@ fn init_creates_a_vault_after_retrying_mismatched_and_weak_passwords() {
     let inputs = vec![
         hidden("first try at it"),
         hidden("first try at itx"), // mismatch
-        hidden("short"),
-        hidden("short"), // too weak
+        hidden("short"),            // too weak: refused before the repeat prompt
         hidden(PASSWORD),
         hidden(PASSWORD),
         line("lock"),
@@ -431,6 +430,31 @@ fn init_creates_a_vault_after_retrying_mismatched_and_weak_passwords() {
     );
     let (exit, _) = fx.run(&["unlock", "carol"], vec![hidden(PASSWORD)]);
     assert_eq!(exit, Exit::Success);
+}
+
+#[test]
+fn init_rejects_a_weak_password_before_asking_to_repeat_it() {
+    let fx = Fixture::new();
+    let inputs = vec![
+        hidden("short"),
+        hidden(PASSWORD),
+        hidden(PASSWORD),
+        line("lock"),
+    ];
+    let (exit, t) = fx.run(&["init", "carol"], inputs);
+    assert_eq!(exit, Exit::Success, "{}", t.stderr());
+    assert_eq!(
+        t.hidden_prompts,
+        [
+            "New master password: ",
+            "New master password: ",
+            "Repeat master password: "
+        ]
+    );
+    assert_eq!(
+        t.err,
+        ["vault: master password must be at least 12 characters"]
+    );
 }
 
 #[test]
@@ -660,6 +684,31 @@ fn passwd_with_a_wrong_current_password_changes_nothing() {
     ];
     let (_, t) = fx.shell(script);
     assert!(t.stderr().contains("wrong vaultname or master password"));
+    let (exit, _) = fx.run(&["unlock", "alice"], vec![hidden(PASSWORD)]);
+    assert_eq!(exit, Exit::Success);
+}
+
+#[test]
+fn passwd_rejects_a_weak_new_password_before_asking_to_repeat_it() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("passwd"),
+        hidden(PASSWORD),
+        hidden("short"),
+        line("lock"),
+    ];
+    let (_, t) = fx.shell(script);
+    assert!(
+        t.stderr()
+            .contains("master password must be at least 12 characters"),
+        "{}",
+        t.stderr()
+    );
+    assert!(
+        !t.hidden_prompts.iter().any(|p| p.starts_with("Repeat")),
+        "{:?}",
+        t.hidden_prompts
+    );
     let (exit, _) = fx.run(&["unlock", "alice"], vec![hidden(PASSWORD)]);
     assert_eq!(exit, Exit::Success);
 }
