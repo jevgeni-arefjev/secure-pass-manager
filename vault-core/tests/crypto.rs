@@ -3,6 +3,11 @@
 //! All vaults use the test format (`create_insecure_for_tests`) so each Argon2id
 //! derivation stays fast; one ignored test covers the production format.
 
+use std::sync::LazyLock;
+
+use proptest::collection::vec;
+use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use vault_core::crypto::{self, CryptoError, Header, MasterPassword, Plaintext};
 
 /// Builds a master password from a literal.
@@ -208,6 +213,101 @@ fn malformed_headers_are_unsupported_format() {
             "{what}"
         );
     }
+}
+
+// --- Header decoder properties (the only code that reads unauthenticated bytes) ---
+
+/// The encoded header of one [`sample_vault`], created once so the many cheap property
+/// cases don't each pay for an Argon2id derivation.
+///
+/// ```text
+/// let mut bytes = SAMPLE_HEADER.clone();
+/// ```
+static SAMPLE_HEADER: LazyLock<Vec<u8>> = LazyLock::new(|| sample_vault().header.encode());
+
+proptest! {
+    /// Any byte string, of any length, decodes or is refused without panicking; whatever
+    /// decodes has the fixed length and re-encodes to exactly the same bytes, so there is
+    /// only one encoding of each header.
+    #[test]
+    fn any_bytes_decode_canonically_or_are_refused(bytes in vec(any::<u8>(), 0..=512)) {
+        match Header::decode(&bytes) {
+            Ok(header) => {
+                prop_assert_eq!(bytes.len(), offset::END);
+                prop_assert_eq!(header.encode(), bytes);
+            }
+            Err(err) => prop_assert_eq!(err, CryptoError::UnsupportedFormat),
+        }
+    }
+
+    /// Random bytes after a valid magic and format version are still refused unless
+    /// they make exactly one header's length.
+    #[test]
+    fn known_prefix_with_wrong_length_is_refused(rest in vec(any::<u8>(), 0..=256)) {
+        prop_assume!(rest.len() != offset::END - offset::SALT);
+        let mut bytes = SAMPLE_HEADER[..offset::SALT].to_vec();
+        bytes.extend_from_slice(&rest);
+
+        prop_assert_eq!(Header::decode(&bytes), Err(CryptoError::UnsupportedFormat));
+    }
+
+    /// Every field value is accepted by the decoder and kept as is: the decoder checks
+    /// only magic, version and length, and leaves the fields to the AEAD tag checks.
+    #[test]
+    fn any_field_values_round_trip(fields in vec(any::<u8>(), offset::END - offset::SALT)) {
+        let mut bytes = SAMPLE_HEADER.clone();
+        bytes[offset::SALT..].copy_from_slice(&fields);
+
+        prop_assert_eq!(Header::decode(&bytes).unwrap().encode(), bytes);
+    }
+}
+
+proptest! {
+    // Each case runs the test-format Argon2id derivation, so keep the count low.
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// A header with random key-wrap fields (salt, wrap nonce, wrapped key) never
+    /// unlocks with the right master password, and fails with the generic error.
+    #[test]
+    fn random_key_wrap_fields_never_unlock(
+        fields in vec(any::<u8>(), offset::REVISION - offset::SALT)
+    ) {
+        let sealed = sample_vault();
+        let original = &sealed.header.encode()[offset::SALT..offset::REVISION];
+        prop_assume!(fields != original);
+
+        let forged = with_header_bytes(&sealed, |b| {
+            b[offset::SALT..offset::REVISION].copy_from_slice(&fields)
+        });
+
+        prop_assert_eq!(
+            crypto::unlock(&forged.header, &password("correct horse")).err(),
+            Some(CryptoError::UnlockFailed)
+        );
+    }
+}
+
+/// With the right vault key, a random body (any length) never opens. Runs the property
+/// by hand so one vault key serves every case.
+#[test]
+fn random_bodies_never_open() {
+    let (key, sealed) =
+        crypto::create_insecure_for_tests(&password("correct horse"), &body("v0")).unwrap();
+
+    TestRunner::default()
+        .run(&vec(any::<u8>(), 0..=8192), |forged_body| {
+            prop_assume!(forged_body != sealed.body);
+            let forged = crypto::SealedVault {
+                header: sealed.header.clone(),
+                body: forged_body,
+            };
+            prop_assert_eq!(
+                crypto::open_body(&key, &forged).err(),
+                Some(CryptoError::BodyCorrupt)
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 /// Test vaults carry the top format bit (0x8001); relabelling one as production

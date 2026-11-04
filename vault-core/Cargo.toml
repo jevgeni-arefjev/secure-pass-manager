@@ -34,4 +34,6 @@ libc = "0.2"
 rlimit = "0.11"
 
 [dev-dependencies]
+proptest = "1.12.0"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 vault-core = { path = ".", features = ["insecure-test-kdf"] }

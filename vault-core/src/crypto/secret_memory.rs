@@ -2,7 +2,47 @@
 //! zeroized before their memory is freed.
 //!
 //! None of these types implement `Clone` or `Debug`, so a secret can't be copied or
-//! printed by accident.
+//! printed by accident. These examples must fail to compile:
+//!
+//! ```compile_fail
+//! # use vault_core::crypto::MasterPassword;
+//! let password = MasterPassword::new("hunter2".into());
+//! let _copy = password.clone();
+//! ```
+//!
+//! ```compile_fail
+//! # use vault_core::crypto::MasterPassword;
+//! let password = MasterPassword::new("hunter2".into());
+//! println!("{password:?}");
+//! ```
+//!
+//! ```compile_fail
+//! # use vault_core::crypto::{self, MasterPassword, Plaintext};
+//! # let password = MasterPassword::new("hunter2".into());
+//! let (key, _) = crypto::create_insecure_for_tests(&password, &Plaintext::new(vec![]))?;
+//! let _copy = key.clone();
+//! # Ok::<(), crypto::CryptoError>(())
+//! ```
+//!
+//! ```compile_fail
+//! # use vault_core::crypto::{self, MasterPassword, Plaintext};
+//! # let password = MasterPassword::new("hunter2".into());
+//! let (key, _) = crypto::create_insecure_for_tests(&password, &Plaintext::new(vec![]))?;
+//! println!("{key:?}");
+//! # Ok::<(), crypto::CryptoError>(())
+//! ```
+//!
+//! ```compile_fail
+//! # use vault_core::crypto::Plaintext;
+//! let body = Plaintext::new(b"[]".to_vec());
+//! let _copy = body.clone();
+//! ```
+//!
+//! ```compile_fail
+//! # use vault_core::crypto::Plaintext;
+//! let body = Plaintext::new(b"[]".to_vec());
+//! println!("{body:?}");
+//! ```
 
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroize;
@@ -95,6 +135,17 @@ impl Drop for LockedBytes {
     /// drop(kek); // zeroized, then unlocked, then freed
     /// ```
     fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+impl LockedBytes {
+    /// Zeroizes the whole allocation, slack pages included; only [`Drop`] calls it.
+    ///
+    /// ```ignore
+    /// self.wipe(); // every byte of `buf` is 0, not just the usable window
+    /// ```
+    fn wipe(&mut self) {
         self.buf.zeroize();
     }
 }
@@ -246,5 +297,44 @@ impl Plaintext {
     #[must_use]
     pub fn is_memory_locked(&self) -> bool {
         self.0.is_locked()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Wiping zeroes every byte of the allocation, including the slack outside the
+    /// usable window, so nothing a secret touched survives the free.
+    #[test]
+    fn wipe_zeroes_the_whole_allocation() {
+        let mut bytes = LockedBytes::zeroed(100);
+        bytes.buf.fill(0xa5);
+
+        bytes.wipe();
+
+        assert!(bytes.buf.iter().all(|&b| b == 0));
+    }
+
+    /// The usable window starts on a page boundary and its pages fit inside the
+    /// allocation, so locking it never touches another allocation's pages.
+    #[test]
+    fn window_is_page_aligned_and_inside_the_allocation() {
+        let page = region::page::size();
+        for len in [0, 1, 32, page - 1, page, page + 1, 3 * page] {
+            let bytes = LockedBytes::zeroed(len);
+            let window = len.div_ceil(page).max(1) * page;
+
+            assert_eq!(bytes.as_bytes().len(), len, "len {len}");
+            assert_eq!(bytes.as_bytes().as_ptr().align_offset(page), 0, "len {len}");
+            assert!(bytes.start + window <= bytes.buf.len(), "len {len}");
+        }
+    }
+
+    /// Copies keep the source's bytes exactly, and new buffers start zeroed.
+    #[test]
+    fn from_slice_copies_and_zeroed_starts_at_zero() {
+        assert_eq!(LockedBytes::from_slice(b"key").as_bytes(), b"key");
+        assert!(LockedBytes::zeroed(64).as_bytes().iter().all(|&b| b == 0));
     }
 }

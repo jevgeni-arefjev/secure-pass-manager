@@ -50,6 +50,18 @@ const STANDARD_FIELD_NAMES: &[&str] = &["title", "username", "password", "url", 
 /// let password = HiddenValue::new(String::from("s3cret!"));
 /// assert_eq!(password.reveal(), "s3cret!");
 /// ```
+///
+/// It can't be copied or printed; these must fail to compile:
+///
+/// ```compile_fail
+/// # use vault_core::session::HiddenValue;
+/// let _copy = HiddenValue::new(String::from("s3cret!")).clone();
+/// ```
+///
+/// ```compile_fail
+/// # use vault_core::session::HiddenValue;
+/// println!("{:?}", HiddenValue::new(String::from("s3cret!")));
+/// ```
 pub struct HiddenValue(LockedBytes);
 
 impl HiddenValue {

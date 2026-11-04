@@ -16,6 +16,7 @@ It is a password manager with one shared Rust core and two front ends:
 ├── Cargo.toml              # workspace root
 ├── Cargo.lock              # pinned dependency versions
 ├── CONTEXT.md              # domain glossary: vault, vaultname, secret, hidden field, unlock/lock
+├── .github/workflows/      # CI: clippy, tests and release build on macOS
 ├── docs/agents/            # notes for coding agents: issue tracker, triage labels, domain docs
 ├── docs/adr/               # architecture decision records
 ├── vault-core/             # shared library, no I/O front end
@@ -25,6 +26,7 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
 │   ├── tests/backup.rs     # backup destinations and Session::backup, through the public API
 │   ├── tests/generator.rs  # password generator behaviour, through its public API
+│   ├── tests/memory.rs     # page locking of every secret type, the zeroize-only fallback and its warning, core dumps off
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
@@ -73,6 +75,10 @@ How the modules map to the specs:
 
 ### Prerequisites
 
+Linux or macOS. Windows is not supported, and no Windows support is planned.
+
+On macOS, install the Xcode Command Line Tools first (they provide the linker): `xcode-select --install`.
+
 Rust 1.89 or newer (edition 2024). On a clean machine, install it with [rustup](https://rustup.rs):
 
 ```bash
@@ -116,12 +122,12 @@ vault locked
 
 All commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands). Notes:
 
-- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
+- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux, `~/Library/Application Support/secure-pass-manager/vaults` on macOS), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
 - The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused.
 - The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
 - `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes, backups. It holds titles in plaintext but never a field value.
-- `backup <path>` writes an encrypted copy of the vault file to a new file outside the vault directory, e.g. `backup /media/usb/alice.vault`; it never overwrites. To restore, create a vault home and put the backup in it: `mkdir -m 700 ~/.local/share/secure-pass-manager/vaults/alice && cp /media/usb/alice.vault ~/.local/share/secure-pass-manager/vaults/alice/secrets.vault`, then `vault unlock alice`. Any vaultname works.
-- `--copy` needs a display (X11 or Wayland on Linux); over plain SSH it reports that the clipboard is not available.
+- `backup <path>` writes an encrypted copy of the vault file to a new file outside the vault directory, e.g. `backup /media/usb/alice.vault`; it never overwrites. To restore, create a vault home and put the backup in it: `mkdir -m 700 ~/.local/share/secure-pass-manager/vaults/alice && cp /media/usb/alice.vault ~/.local/share/secure-pass-manager/vaults/alice/secrets.vault`, then `vault unlock alice`. Any vaultname works. On macOS, use the macOS vault directory above, in quotes because of the space.
+- `--copy` needs a display (X11 or Wayland on Linux, a logged-in desktop session on macOS); over plain SSH it reports that the clipboard is not available.
 - If the process is killed by a signal while waiting at the `vault>` prompt, the vault is wiped, but the terminal can be left in raw mode; type `reset` to fix it.
 
 ### Tests and checks
@@ -132,6 +138,8 @@ cargo test -- --ignored             # slow tests: the production KDF (256 MiB Ar
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+CI (`.github/workflows/ci.yml`) runs clippy, both test commands and a release build on macOS for every push to `main` and every pull request. `tests/memory.rs` runs on Linux only.
 
 Tests create vaults in a cheap test format (feature `insecure-test-kdf`, ADR-0005), which only test builds enable. Run tests in debug: `cargo test --release` is refused on purpose, so the test format can never end up in a release binary.
 

@@ -18,6 +18,7 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 - Crypto: Argon2id (m=256 MiB, t=3, p=1) for the KEK, with KDF params fixed by the format version in the vault header (ADR-0005); XChaCha20-Poly1305 for both the vault-key wrap and the body; HKDF-SHA-256 for the body key. Do not change algorithms or params without asking.
 - CLI session is an interactive shell: `vault unlock` opens a `vault>` prompt and keys live only in that process, never on disk.
 - Secrets are entered only via hidden terminal prompts (e.g. `vault save <secret>` prompts for the password).
+- Supported platforms: Linux and macOS (CI runs on macOS, `.github/workflows/ci.yml`). No Windows support is planned: don't add Windows-specific code, docs or CI. Existing `cfg(unix)` code stays as it is.
 - Web is a local demo only (no Vercel/serverless: design needs a long-lived process holding session keys).
 - Terminology (vault, vaultname, secret, hidden field, unlock/lock, ...) is defined in `CONTEXT.md`; use it in code and docs.
 
