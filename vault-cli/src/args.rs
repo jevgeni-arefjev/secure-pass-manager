@@ -15,10 +15,10 @@ pub const DEFAULT_IDLE_MINUTES: u64 = 5;
 /// Audit events `log` shows, unless `--limit` says otherwise.
 pub const DEFAULT_LOG_LIMIT: u16 = 20;
 
-/// `vault`: a local password manager with one encrypted vault per person.
+/// Local password manager with one encrypted vault per person.
 ///
-/// The help text is set explicitly, so this doc comment (and its example) stays out of
-/// `vault --help`.
+/// clap shows the first paragraph of this comment as the help summary; `long_about = None`
+/// keeps the rest (and its example) out of `vault --help`.
 ///
 /// ```
 /// use clap::Parser;
@@ -27,12 +27,7 @@ pub const DEFAULT_LOG_LIMIT: u16 = 20;
 /// assert!(matches!(cli.command, Command::Unlock(_)));
 /// ```
 #[derive(Debug, Parser)]
-#[command(
-    name = "vault",
-    version,
-    about = "`vault`: a local password manager with one encrypted vault per person.",
-    long_about = None
-)]
+#[command(name = "vault", version, long_about = None)]
 pub struct Cli {
     /// Directory holding the vaults [default: the platform data directory]
     #[arg(long, global = true, value_name = "PATH")]
@@ -79,6 +74,9 @@ pub struct Gen {
 
 /// One line typed at the `vault>` prompt.
 ///
+/// `long_about = None` keeps this comment's example out of `help`, even if the help
+/// template changes.
+///
 /// ```
 /// use clap::Parser;
 /// use vault_cli::args::{ShellCommand, ShellLine};
@@ -90,6 +88,7 @@ pub struct Gen {
     name = "vault>",
     no_binary_name = true,
     disable_version_flag = true,
+    long_about = None,
     help_template = "{subcommands}",
     after_help = "Quote titles with spaces: get \"my bank\""
 )]
