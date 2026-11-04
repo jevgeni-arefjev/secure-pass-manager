@@ -86,15 +86,24 @@ impl fmt::Display for WeakMasterPassword {
     }
 }
 
-/// Checks that `password` is strong enough to protect a new vault.
+/// Checks that `password` is strong enough to protect a new vault. Exported as
+/// `session::check_master_password` so front ends can reject a weak password before
+/// asking the user to repeat it; `Session::create` and `change_master_password` still
+/// call it themselves.
 ///
 /// Security: works on the locked bytes directly; no copy of the password (not even a
 /// lowercased one) is made.
 ///
-/// ```ignore
-/// check(&MasterPassword::new("hunter2".into())) == Err(WeakMasterPassword::TooShort)
 /// ```
-pub(super) fn check(password: &MasterPassword) -> Result<(), WeakMasterPassword> {
+/// use vault_core::crypto::MasterPassword;
+/// use vault_core::session::{check_master_password, WeakMasterPassword};
+/// assert_eq!(
+///     check_master_password(&MasterPassword::new("hunter2".into())),
+///     Err(WeakMasterPassword::TooShort)
+/// );
+/// assert!(check_master_password(&MasterPassword::new("correct horse battery".into())).is_ok());
+/// ```
+pub fn check(password: &MasterPassword) -> Result<(), WeakMasterPassword> {
     let text = std::str::from_utf8(password.as_bytes()).expect("built from a String");
     if text.chars().count() < MIN_MASTER_PASSWORD_CHARS {
         return Err(WeakMasterPassword::TooShort);

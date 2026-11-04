@@ -60,14 +60,16 @@ use crate::crypto::{self, CryptoError, Header, MasterPassword, Plaintext, Sealed
 use crate::storage::{StorageError, VaultStore, Vaultname};
 
 pub use clock::{Clock, SystemClock};
-pub use master_password_policy::{MIN_MASTER_PASSWORD_CHARS, WeakMasterPassword};
+pub use master_password_policy::{
+    MIN_MASTER_PASSWORD_CHARS, WeakMasterPassword, check as check_master_password,
+};
 pub use secret::{CustomField, FieldValue, HiddenValue, InvalidSecret, Secret};
 
 /// Idle time after which a session locks itself, unless configured otherwise.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Shortest time any failed unlock takes, so failures can't be told apart by timing.
-const MIN_UNLOCK_FAILURE: Duration = Duration::from_secs(1);
+pub const MIN_UNLOCK_FAILURE: Duration = Duration::from_secs(1);
 
 /// How a session behaves; front ends start from [`SessionConfig::new`].
 ///

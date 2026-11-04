@@ -186,6 +186,24 @@ impl MasterPassword {
         self.0.as_bytes()
     }
 
+    /// Whether `self` and `other` are the same password, compared after NFC
+    /// normalization (ADR-0007). For "type it again" confirmation prompts.
+    ///
+    /// Security: both sides stay in locked memory; no copy is made. The comparison is
+    /// not constant-time, which is fine for comparing two entries the same user just
+    /// typed, but don't use it to check a password against a stored value.
+    ///
+    /// ```
+    /// # use vault_core::crypto::MasterPassword;
+    /// let first = MasterPassword::new("correct horse battery".into());
+    /// assert!(first.matches(&MasterPassword::new("correct horse battery".into())));
+    /// assert!(!first.matches(&MasterPassword::new("correct horse batterx".into())));
+    /// ```
+    #[must_use]
+    pub fn matches(&self, other: &MasterPassword) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+
     /// Whether the password's memory is locked out of swap (false means zeroize-only).
     ///
     /// ```
