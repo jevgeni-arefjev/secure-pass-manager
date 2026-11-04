@@ -55,7 +55,7 @@ A field holding a password, token, key or seed; it is always masked unless expli
 _Avoid_: secret field, secret value
 
 **Reveal**:
-Showing or copying the hidden fields of one secret, only on an explicit request.
+Showing or copying a hidden field of one secret, only on an explicit request.
 _Avoid_: unmask, decrypt
 
 **Username**:
