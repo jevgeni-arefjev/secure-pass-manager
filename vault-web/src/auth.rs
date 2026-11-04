@@ -6,11 +6,12 @@ use std::sync::Arc;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, header};
-use axum::response::{IntoResponse, Response};
+use vault_core::session::{Session, SessionError};
+use vault_core::storage::FileStore;
 
 use crate::AppState;
 use crate::api::ApiError;
-use crate::sessions::{SessionId, SessionKey, WebSession};
+use crate::sessions::{SessionId, SessionKey, Sessions, WebSession};
 
 /// The session cookie's name. The `__Host-` prefix makes browsers insist on `Secure`,
 /// `Path=/` and no `Domain`, so no other host can set or read it.
@@ -88,8 +89,8 @@ pub(crate) fn is_state_changing(method: &Method) -> bool {
 
 /// The caller's live session, from its cookie.
 ///
-/// Security: 401 without a live session, with the cookie deleted and the browser's
-/// cache and storage cleared (as on lock); on a state-changing
+/// Security: 401 ([`ApiError::LOCKED`]) without a live session, with the cookie deleted
+/// and the browser's cache and storage cleared (as on lock); on a state-changing
 /// request, 403 unless `X-CSRF-Token` is this session's token. Another session's
 /// token never matches.
 ///
@@ -119,30 +120,33 @@ impl CurrentSession {
     pub(crate) fn session(&self) -> &WebSession {
         &self.session
     }
-}
 
-/// Why there is no [`CurrentSession`]: an [`ApiError`]; a 401 also ends the session in
-/// the browser ([`ended_session_headers`]).
-pub(crate) struct NoSession(ApiError);
-
-impl IntoResponse for NoSession {
-    /// The error response; a 401 also deletes the cookie and clears site data.
+    /// Runs `f` on this session's vault, and keeps the session only while it is live.
+    ///
+    /// Security: the vault is the one this session unlocked, never one named by the
+    /// request. If the vault is locked afterwards (it auto-locked since the lookup, or
+    /// `f` locked it, e.g. on a save conflict), the session is removed from `sessions`
+    /// and wiped, and the result is [`SessionError::Locked`] whatever `f` returned.
     ///
     /// ```ignore
-    /// NoSession(ApiError::LOCKED).into_response()
+    /// let count = current.with_live_vault(&state.sessions, |vault| Ok(vault.list()?.len()))?;
     /// ```
-    fn into_response(self) -> Response {
-        let locked = self.0.status() == ApiError::LOCKED.status();
-        let mut response = self.0.into_response();
-        if locked {
-            response.headers_mut().extend(ended_session_headers());
+    pub(crate) fn with_live_vault<R>(
+        &self,
+        sessions: &Sessions,
+        f: impl FnOnce(&mut Session<FileStore>) -> Result<R, SessionError>,
+    ) -> Result<R, SessionError> {
+        let result = self.session.with_vault(f);
+        if !self.session.is_unlocked() {
+            sessions.remove(self.key);
+            return Err(SessionError::Locked);
         }
-        response
+        result
     }
 }
 
 impl FromRequestParts<AppState> for CurrentSession {
-    type Rejection = NoSession;
+    type Rejection = ApiError;
 
     /// Looks the cookie's session up and, on a state-changing request, checks the
     /// CSRF token.
@@ -155,9 +159,9 @@ impl FromRequestParts<AppState> for CurrentSession {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let key = request_session_id(&parts.headers)
-            .ok_or(NoSession(ApiError::LOCKED))?
+            .ok_or(ApiError::LOCKED)?
             .key();
-        let session = state.sessions.get(key).ok_or(NoSession(ApiError::LOCKED))?;
+        let session = state.sessions.get(key).ok_or(ApiError::LOCKED)?;
         if is_state_changing(&parts.method) {
             let token = parts
                 .headers
@@ -165,7 +169,7 @@ impl FromRequestParts<AppState> for CurrentSession {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
             if !session.csrf_matches(token) {
-                return Err(NoSession(ApiError::CSRF));
+                return Err(ApiError::CSRF);
             }
         }
         Ok(Self { key, session })

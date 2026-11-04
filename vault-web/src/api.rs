@@ -3,6 +3,7 @@
 //! Errors are `{"error": "<message>"}`, with a `"field"` naming the input at fault for
 //! validation errors. Messages never carry internals.
 
+mod secrets;
 mod vault;
 
 use std::borrow::Cow;
@@ -14,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Serialize;
 
-use crate::AppState;
+use crate::{AppState, auth};
 
 /// An API error: a status and a message safe to show the user.
 ///
@@ -30,6 +31,8 @@ pub(crate) struct ApiError {
     status: StatusCode,
     message: Cow<'static, str>,
     field: Option<&'static str>,
+    /// Whether the response also ends the session in the browser.
+    ends_session: bool,
 }
 
 impl ApiError {
@@ -43,6 +46,7 @@ impl ApiError {
             status,
             message: Cow::Borrowed(message),
             field: None,
+            ends_session: false,
         }
     }
 
@@ -67,8 +71,19 @@ impl ApiError {
         "wrong vaultname or master password",
     );
 
-    /// No live session: no cookie, an unknown one, or a locked or expired session.
-    pub(crate) const LOCKED: Self = Self::fixed(StatusCode::UNAUTHORIZED, "vault is locked");
+    /// No live session: no cookie, an unknown one, or a locked or expired session. The
+    /// response also deletes the cookie and clears the browser's cache and storage
+    /// ([`auth::ended_session_headers`]).
+    pub(crate) const LOCKED: Self = Self {
+        status: StatusCode::UNAUTHORIZED,
+        message: Cow::Borrowed("vault is locked"),
+        field: None,
+        ends_session: true,
+    };
+
+    /// No secret with the title in the path. Never echoes the title.
+    pub(crate) const SECRET_NOT_FOUND: Self =
+        Self::fixed(StatusCode::NOT_FOUND, "no secret with this title");
 
     /// Create was asked for a vaultname that already has a vault.
     pub(crate) const VAULTNAME_TAKEN: Self = Self::fixed(StatusCode::CONFLICT, "vaultname taken");
@@ -107,16 +122,8 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
             field: Some(field),
+            ends_session: false,
         }
-    }
-
-    /// The HTTP status of this error.
-    ///
-    /// ```ignore
-    /// assert_eq!(ApiError::LOCKED.status(), StatusCode::UNAUTHORIZED);
-    /// ```
-    pub(crate) fn status(&self) -> StatusCode {
-        self.status
     }
 }
 
@@ -129,7 +136,8 @@ struct ErrorBody<'a> {
 }
 
 impl IntoResponse for ApiError {
-    /// `status` with `{"error": message}`, plus `"field"` for a validation error.
+    /// `status` with `{"error": message}`, plus `"field"` for a validation error; for
+    /// [`ApiError::LOCKED`], also the headers ending the session in the browser.
     ///
     /// ```ignore
     /// let response = ApiError::NOT_FOUND.into_response();
@@ -139,7 +147,11 @@ impl IntoResponse for ApiError {
             error: &self.message,
             field: self.field,
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        if self.ends_session {
+            response.headers_mut().extend(auth::ended_session_headers());
+        }
+        response
     }
 }
 
@@ -154,5 +166,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/unlock", post(vault::unlock))
         .route("/lock", post(vault::lock))
         .route("/session", get(vault::session))
+        .route("/secrets", get(secrets::list))
+        .route("/secrets/{title}", get(secrets::detail))
         .fallback(|| async { ApiError::NOT_FOUND })
 }

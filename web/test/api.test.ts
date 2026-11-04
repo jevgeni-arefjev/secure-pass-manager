@@ -122,3 +122,28 @@ test("a response without a JSON error body still gives a generic error", async (
     return true;
   });
 });
+
+test("listSecrets reads the list from GET /api/secrets without a CSRF header", async () => {
+  const secrets = [{ title: "GitHub", username: "alice", url: null, tags: [], has_password: true, has_notes: false, custom_fields: [], created_at: 1, updated_at: 1 }];
+  const { fetch, calls } = fakeFetch(200, { secrets });
+  const api = new Api(fetch, () => {});
+  assert.deepEqual(await api.listSecrets(), secrets);
+  assert.equal(calls[0]?.url, "/api/secrets");
+  assert.equal(calls[0]?.init.method, "GET");
+  assert.equal(headers(calls[0]!)["x-csrf-token"], undefined);
+});
+
+test("getSecret asks for the percent-encoded title; a 404 is an error, not a lock", async () => {
+  const { fetch, calls } = fakeFetch(404, { error: "no secret with this title" });
+  let locked = false;
+  const api = new Api(fetch, () => {
+    locked = true;
+  });
+  await assert.rejects(api.getSecret("my bank / savings"), (err: unknown) => {
+    assert.ok(err instanceof ApiError);
+    assert.equal(err.status, 404);
+    return true;
+  });
+  assert.equal(calls[0]?.url, "/api/secrets/my%20bank%20%2F%20savings");
+  assert.equal(locked, false);
+});

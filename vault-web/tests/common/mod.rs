@@ -13,7 +13,10 @@ use axum::http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
-use vault_core::session::Clock;
+use vault_core::audit::FileSink;
+use vault_core::crypto::MasterPassword;
+use vault_core::session::{Clock, Secret, Session, SessionConfig};
+use vault_core::storage::FileStore;
 use vault_web::{AppConfig, Assets, CreateFormat};
 
 pub const PORT: u16 = 8443;
@@ -177,6 +180,31 @@ impl TestApp {
         Unlocked::from_response(response).await
     }
 
+    /// Creates vault `vaultname` with [`PASSWORD`] holding `secrets`, written straight
+    /// through `vault-core` (the API can't add secrets yet), and returns a web session
+    /// unlocked on it.
+    ///
+    /// ```text
+    /// let alice = app.vault_with("alice", [Secret::new("github")]).await;
+    /// ```
+    pub async fn vault_with(
+        &self,
+        vaultname: &str,
+        secrets: impl IntoIterator<Item = Secret>,
+    ) -> Unlocked {
+        let vault_dir = self.dir.path().join("web-vaults");
+        let store = FileStore::new(&vault_dir).unwrap();
+        let config = SessionConfig::new(Arc::new(FileSink::new(&vault_dir)));
+        let password = MasterPassword::new(PASSWORD.into());
+        let mut session =
+            Session::create_insecure_for_tests(store, vaultname, &password, config).unwrap();
+        for secret in secrets {
+            session.save(secret).unwrap();
+        }
+        session.lock();
+        self.unlock(vaultname).await
+    }
+
     /// Unlocks vault `vaultname` with [`PASSWORD`] and returns its session.
     ///
     /// ```text
@@ -232,6 +260,18 @@ impl Unlocked {
     /// ```
     pub fn lock(&self) -> Request<Body> {
         self.authorize(api(Method::POST, "/api/lock"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// `GET path` with this session's cookie.
+    ///
+    /// ```text
+    /// let response = app.send(alice.get("/api/secrets")).await;
+    /// ```
+    pub fn get(&self, path: &str) -> Request<Body> {
+        api(Method::GET, path)
+            .header(header::COOKIE, &self.cookie)
             .body(Body::empty())
             .unwrap()
     }

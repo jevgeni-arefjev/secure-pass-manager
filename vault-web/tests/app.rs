@@ -141,14 +141,17 @@ async fn request_log_has_method_route_template_status_and_latency() {
 #[tokio::test]
 async fn request_log_never_holds_the_concrete_path() {
     let app = TestApp::new();
-    for path in [
-        "/api/secrets/alice-github",
-        "/alice-github",
-        "/a/alice-github",
+    for (path, status) in [
+        ("/api/secrets/alice-github", StatusCode::UNAUTHORIZED), // no session
+        ("/alice-github", StatusCode::NOT_FOUND),
+        ("/a/alice-github", StatusCode::NOT_FOUND),
     ] {
         let (response, logs) = send_logged(&app, get(path)).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(logs.contains("status=404"), "{logs}");
+        assert_eq!(response.status(), status, "{path}");
+        assert!(
+            logs.contains(&format!("status={}", status.as_u16())),
+            "{logs}"
+        );
         assert!(!logs.contains("alice-github"), "{logs}");
     }
 }

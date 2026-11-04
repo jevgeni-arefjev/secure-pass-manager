@@ -1,9 +1,13 @@
 // API client for vault-web: JSON in and out, the CSRF header on state-changing
 // requests, and the rule that a 401 means the vault is locked.
 //
+// Secrets are addressed by title, percent-encoded by `secretPath`.
+//
 // Security: the CSRF token lives only in this object's private field (memory), never
 // in localStorage, sessionStorage or a cookie. The session cookie is HttpOnly and
 // handled by the browser alone.
+
+import { secretPath } from "./secrets.js";
 
 /** What the server says about an unlocked session. */
 export interface SessionInfo {
@@ -17,6 +21,44 @@ export interface UnlockRequest {
   vaultname: string;
   master_password: string;
   idle_timeout_minutes?: number;
+}
+
+/** A custom field in the secret list: its name and whether it is hidden, never its value. */
+export interface FieldName {
+  name: string;
+  hidden: boolean;
+}
+
+/**
+ * The fields both secret views carry: what identifies a secret and whether it has a
+ * password (never its value). Timestamps are Unix seconds.
+ */
+export interface SecretFields {
+  title: string;
+  username: string | null;
+  url: string | null;
+  tags: string[];
+  has_password: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One secret in the list from `GET /api/secrets`. Holds no notes or custom field value. */
+export interface SecretSummary extends SecretFields {
+  has_notes: boolean;
+  custom_fields: FieldName[];
+}
+
+/** A custom field in the secret detail: plain ones carry their value, hidden ones none. */
+export type CustomFieldView = { name: string; hidden: false; value: string } | { name: string; hidden: true };
+
+/**
+ * One secret from `GET /api/secrets/{title}`: every non-hidden field; hidden fields are
+ * named only (`has_password`, custom fields with `hidden: true`).
+ */
+export interface SecretDetail extends SecretFields {
+  notes: string | null;
+  custom_fields: CustomFieldView[];
 }
 
 /** Shown when a failed response carries no usable `{"error": ...}` body. */
@@ -125,6 +167,28 @@ export class Api {
     } finally {
       this.#csrfToken = null;
     }
+  }
+
+  /**
+   * The vault's secrets, sorted by title ignoring case, without hidden values.
+   *
+   * @example
+   * const secrets = await api.listSecrets();
+   */
+  async listSecrets(): Promise<SecretSummary[]> {
+    const body = (await this.#request("GET", "/api/secrets")) as { secrets: SecretSummary[] };
+    return body.secrets;
+  }
+
+  /**
+   * The secret titled `title`, with hidden fields named only. An unknown title rejects
+   * with a 404 {@link ApiError}.
+   *
+   * @example
+   * const github = await api.getSecret("GitHub");
+   */
+  async getSecret(title: string): Promise<SecretDetail> {
+    return (await this.#request("GET", secretPath(title))) as SecretDetail;
   }
 
   /**

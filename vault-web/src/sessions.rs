@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use vault_core::session::{Clock, Session};
+use vault_core::session::{Clock, Session, SessionError};
 use vault_core::storage::{FileStore, Vaultname};
 use zeroize::Zeroizing;
 
@@ -158,6 +158,29 @@ impl WebSession {
         self.csrf_token.as_bytes().ct_eq(token.as_bytes()).into()
     }
 
+    /// Runs `f` on the vault under the session's mutex; [`SessionError::Locked`]
+    /// without running it if the vault is already locked.
+    ///
+    /// ```ignore
+    /// let count = session.with_vault(|vault| Ok(vault.list()?.len()))?;
+    /// ```
+    pub(crate) fn with_vault<R>(
+        &self,
+        f: impl FnOnce(&mut Session<FileStore>) -> Result<R, SessionError>,
+    ) -> Result<R, SessionError> {
+        self.vault().as_mut().map_or(Err(SessionError::Locked), f)
+    }
+
+    /// Whether the vault is still unlocked; auto-locks it first if the idle timeout has
+    /// passed. Checking doesn't count as activity.
+    ///
+    /// ```ignore
+    /// if !session.is_unlocked() { sessions.remove(key) }
+    /// ```
+    pub(crate) fn is_unlocked(&self) -> bool {
+        self.vault().as_mut().is_some_and(Session::is_unlocked)
+    }
+
     /// Locks the vault and wipes its keys; later calls do nothing.
     ///
     /// ```ignore
@@ -177,7 +200,7 @@ impl WebSession {
     /// ```
     fn is_alive(&self, now: Instant, lifetime: Duration) -> bool {
         let young = now.saturating_duration_since(self.created) < lifetime;
-        young && self.vault().as_mut().is_some_and(Session::is_unlocked)
+        young && self.is_unlocked()
     }
 
     /// The vault slot. A mutex poisoned by a panicking request is recovered: the slot

@@ -1,12 +1,26 @@
-// Client entry point: the create, unlock and (for now empty) vault pages.
+// Client entry point: the create and unlock pages, and the vault's secret list and
+// secret detail pages.
 //
 // Security: the DOM is built only with createElement/textContent, never innerHTML or
 // other HTML sinks; the CSP's `require-trusted-types-for 'script'` makes any such sink
-// throw at runtime. Vault data and the CSRF token live in memory only; any 401 wipes
-// them and shows the unlock page. Master password inputs are cleared once submitted.
+// throw at runtime. Field values are shown through `displayText`, and a secret's URL
+// is a link only for http/https (`safeHref`). Vault data and the CSRF token live in
+// memory only; any 401 wipes them and shows the unlock page. Master password inputs
+// are cleared once submitted. Hidden fields never reach the browser on these pages:
+// they are shown as a mask.
 
-import { Api, ApiError, type SessionInfo, type UnlockRequest } from "./api.js";
+import {
+  Api,
+  ApiError,
+  type SecretDetail,
+  type SecretSummary,
+  type SessionInfo,
+  type UnlockRequest,
+} from "./api.js";
 import { checkNewMasterPassword, parseIdleTimeout } from "./forms.js";
+import { filterSecrets } from "./secrets.js";
+import { displayText } from "./text.js";
+import { safeHref } from "./url.js";
 
 /** Default idle timeout shown in the forms; the server uses the same default. */
 const DEFAULT_IDLE_MINUTES = "5";
@@ -14,12 +28,21 @@ const DEFAULT_IDLE_MINUTES = "5";
 /** Where every page is rendered. */
 const root = document.getElementById("app");
 
-/** Whether a vault page is showing, i.e. there is vault data on screen to wipe. */
-let vaultShown = false;
+/** What every hidden field is shown as; its length says nothing about the value. */
+const MASK = "••••••••";
 
-/** The vault-web API; a 401 while a vault is shown wipes it and shows the unlock page. */
+/** Bumped on every page change, so a response for an earlier page is dropped. */
+let pageGeneration = 0;
+
+/**
+ * The open session; set from unlock to lock, i.e. while vault data may be on screen.
+ * `showUnlock` clears it.
+ */
+let session: SessionInfo | null = null;
+
+/** The vault-web API; a 401 while a vault is open wipes it and shows the unlock page. */
 const api = new Api(window.fetch.bind(window), () => {
-  if (vaultShown) {
+  if (session !== null) {
     showUnlock("Your vault was locked.");
   }
 });
@@ -86,8 +109,21 @@ function button(text: string, type: "button" | "submit"): HTMLButtonElement {
  * render(textElement("h1", "Vault"));
  */
 function render(...children: Node[]): void {
-  vaultShown = false;
+  pageGeneration += 1;
   root?.replaceChildren(...children);
+}
+
+/**
+ * An empty or `text`-holding error line that screen readers announce.
+ *
+ * @example
+ * const formError = alertLine();
+ */
+function alertLine(text = ""): HTMLElement {
+  const line = textElement("p", text);
+  line.className = "form-error";
+  line.setAttribute("role", "alert");
+  return line;
 }
 
 /**
@@ -149,18 +185,18 @@ function unlockRequest(vaultname: Field, password: Field, idle: Field): UnlockRe
 }
 
 /**
- * Shows the unlock page, with an optional `notice` (e.g. after an auto-lock).
+ * Shows the unlock page, with an optional `notice` (e.g. after an auto-lock), and
+ * forgets the session.
  *
  * @example
  * showUnlock("Your vault was locked.");
  */
 function showUnlock(notice?: string): void {
+  session = null;
   const vaultname = field("Vaultname", "vaultname", "text", "username");
   const password = field("Master password", "master_password", "password", "current-password");
   const idle = idleField();
-  const formError = textElement("p", "");
-  formError.className = "form-error";
-  formError.setAttribute("role", "alert");
+  const formError = alertLine();
   const submit = button("Unlock", "submit");
   const form = document.createElement("form");
   form.append(vaultname.row, password.row, idle.row, formError, submit);
@@ -209,9 +245,7 @@ function showCreate(): void {
   const password = field("Master password (at least 12 characters)", "master_password", "password", "new-password");
   const confirmation = field("Master password again", "confirm_master_password", "password", "new-password");
   const idle = idleField();
-  const formError = textElement("p", "");
-  formError.className = "form-error";
-  formError.setAttribute("role", "alert");
+  const formError = alertLine();
   const submit = button("Create vault", "submit");
   const form = document.createElement("form");
   form.append(vaultname.row, password.row, confirmation.row, idle.row, formError, submit);
@@ -252,15 +286,31 @@ function showCreate(): void {
 }
 
 /**
- * Shows the unlocked vault: its name, (for now) no secrets, and the Lock button.
+ * Shows the unlocked vault's secret list; the entry point after create, unlock and a
+ * page load with a live session.
  *
  * @example
  * api.unlock(request).then(showVault);
  */
-function showVault(session: SessionInfo): void {
+function showVault(info: SessionInfo): void {
+  session = info;
+  showList();
+}
+
+/**
+ * Renders a vault page: the vaultname with the Lock button, the auto-lock hint, a
+ * status line, and `content`.
+ *
+ * @example
+ * vaultPage(textElement("p", "Loading…"));
+ */
+function vaultPage(...content: Node[]): void {
+  if (session === null) {
+    showUnlock();
+    return;
+  }
   const lock = button("Lock", "button");
-  const status = textElement("p", "");
-  status.setAttribute("role", "alert");
+  const status = alertLine();
   lock.addEventListener("click", () => {
     lock.disabled = true;
     api.lock().then(
@@ -273,13 +323,252 @@ function showVault(session: SessionInfo): void {
   });
   const header = document.createElement("header");
   header.append(textElement("h1", session.vaultname), lock);
-  const idle = textElement(
-    "p",
-    `Locks itself after ${session.idle_timeout_minutes} idle minute${session.idle_timeout_minutes === 1 ? "" : "s"}.`,
-  );
+  const minutes = session.idle_timeout_minutes;
+  const idle = textElement("p", `Locks itself after ${minutes} idle minute${minutes === 1 ? "" : "s"}.`);
   idle.className = "hint";
-  render(header, idle, status, textElement("p", "No secrets yet."));
-  vaultShown = true;
+  render(header, idle, status, ...content);
+}
+
+/**
+ * Shows a vault page saying "Loading…", runs `load`, and shows its result with
+ * `show`. A failure goes to `onFailure` if it returns `true`, else it is shown on the
+ * page.
+ *
+ * A result arriving after another page was shown is dropped, so a slow response
+ * can't replace the page the user moved on to. That covers a 401 too: the API client
+ * has already shown the unlock page.
+ *
+ * @example
+ * loadVaultPage(() => api.listSecrets(), (secrets) => renderList(secrets));
+ */
+function loadVaultPage<T>(load: () => Promise<T>, show: (value: T) => void, onFailure?: (err: unknown) => boolean): void {
+  vaultPage(textElement("p", "Loading…"));
+  const generation = pageGeneration;
+  load().then(
+    (value) => {
+      if (generation === pageGeneration) {
+        show(value);
+      }
+    },
+    (err: unknown) => {
+      if (generation === pageGeneration && onFailure?.(err) !== true) {
+        const message = err instanceof ApiError ? err.message : "the server could not be reached";
+        vaultPage(alertLine(`Could not load: ${message}.`));
+      }
+    },
+  );
+}
+
+/**
+ * Loads the secret list and shows it, with an optional `notice` above it.
+ *
+ * @example
+ * showList("That secret no longer exists.");
+ */
+function showList(notice?: string): void {
+  loadVaultPage(
+    () => api.listSecrets(),
+    (secrets) => renderList(secrets, notice),
+  );
+}
+
+/**
+ * Renders the secret list with a search box; searching filters the loaded list in the
+ * browser and sends nothing to the server.
+ *
+ * @example
+ * renderList(await api.listSecrets());
+ */
+function renderList(secrets: SecretSummary[], notice?: string): void {
+  const search = field("Search title, username, URL or tags", "search", "search", "off");
+  search.input.spellcheck = false;
+  const list = document.createElement("ul");
+  list.className = "secrets";
+  const empty = textElement("p", "");
+  empty.className = "hint";
+  /**
+   * Shows the secrets matching the current search, or why none are shown.
+   *
+   * @example
+   * search.input.addEventListener("input", update);
+   */
+  const update = (): void => {
+    const shown = filterSecrets(secrets, search.input.value);
+    list.replaceChildren(...shown.map(secretItem));
+    empty.textContent =
+      secrets.length === 0 ? "No secrets yet." : shown.length === 0 ? "No secrets match the search." : "";
+  };
+  search.input.addEventListener("input", update);
+  update();
+  const children: Node[] = [];
+  if (notice !== undefined) {
+    const note = textElement("p", notice);
+    note.className = "notice";
+    children.push(note);
+  }
+  vaultPage(...children, search.row, empty, list);
+  search.input.focus();
+}
+
+/**
+ * One list item: a button opening the secret, showing its title, username, URL (as
+ * text) and tags.
+ *
+ * @example
+ * list.append(secretItem(secret));
+ */
+function secretItem(secret: SecretSummary): HTMLLIElement {
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "secret";
+  open.append(textElement("strong", displayText(secret.title, false)));
+  for (const text of [secret.username, secret.url]) {
+    if (text !== null) {
+      open.append(textElement("span", displayText(text, false)));
+    }
+  }
+  if (secret.tags.length > 0) {
+    open.append(tagList(secret.tags));
+  }
+  open.addEventListener("click", () => showDetail(secret.title));
+  const item = document.createElement("li");
+  item.append(open);
+  return item;
+}
+
+/**
+ * The tags of a secret as a list of small labels.
+ *
+ * @example
+ * row.append(tagList(["work", "code"]));
+ */
+function tagList(tags: string[]): HTMLUListElement {
+  const list = document.createElement("ul");
+  list.className = "tags";
+  list.append(...tags.map((tag) => textElement("li", displayText(tag, false))));
+  return list;
+}
+
+/**
+ * Loads the secret titled `title` and shows it; if it is gone, shows the list again.
+ *
+ * @example
+ * showDetail("GitHub");
+ */
+function showDetail(title: string): void {
+  loadVaultPage(
+    () => api.getSecret(title),
+    renderDetail,
+    (err) => {
+      const gone = err instanceof ApiError && err.status === 404;
+      if (gone) {
+        showList("That secret no longer exists.");
+      }
+      return gone;
+    },
+  );
+}
+
+/**
+ * Renders one secret: every field that is set, hidden fields masked, the URL as a
+ * link only if it is http or https.
+ *
+ * @example
+ * renderDetail(await api.getSecret("GitHub"));
+ */
+function renderDetail(secret: SecretDetail): void {
+  const fields = document.createElement("dl");
+  /**
+   * Appends a `label` / `value` pair to the field list.
+   *
+   * @example
+   * row("Username", text("alice"));
+   */
+  const row = (label: string, value: Node): void => {
+    const dd = document.createElement("dd");
+    dd.append(value);
+    fields.append(textElement("dt", label), dd);
+  };
+  /**
+   * `value` as a text node, escaped by `displayText`.
+   *
+   * @example
+   * row("Username", text(secret.username));
+   */
+  const text = (value: string): Text => document.createTextNode(displayText(value, false));
+  if (secret.username !== null) {
+    row("Username", text(secret.username));
+  }
+  if (secret.has_password) {
+    row("Password", masked());
+  }
+  if (secret.url !== null) {
+    row("URL", urlValue(secret.url));
+  }
+  if (secret.notes !== null) {
+    const notes = textElement("p", displayText(secret.notes, true));
+    notes.className = "notes";
+    row("Notes", notes);
+  }
+  if (secret.tags.length > 0) {
+    row("Tags", tagList(secret.tags));
+  }
+  for (const custom of secret.custom_fields) {
+    row(displayText(custom.name, false), custom.hidden ? masked() : text(custom.value));
+  }
+  row("Created", text(timestamp(secret.created_at)));
+  row("Updated", text(timestamp(secret.updated_at)));
+
+  const back = button("All secrets", "button");
+  back.className = "link";
+  back.addEventListener("click", () => showList());
+  vaultPage(back, textElement("h2", displayText(secret.title, false)), fields);
+  back.focus();
+}
+
+/**
+ * The mask shown for a hidden field, announced as hidden to screen readers.
+ *
+ * @example
+ * row("Password", masked());
+ */
+function masked(): HTMLElement {
+  const mask = textElement("span", MASK);
+  mask.className = "masked";
+  mask.setAttribute("aria-label", "hidden");
+  return mask;
+}
+
+/**
+ * A secret's URL: a link if `safeHref` allows it, else plain text.
+ *
+ * Security: the link opens in a new tab without an opener or referrer, so the site
+ * can neither script this page nor learn its address.
+ *
+ * @example
+ * row("URL", urlValue("https://github.com"));
+ */
+function urlValue(url: string): Node {
+  const shown = displayText(url, false);
+  const href = safeHref(url);
+  if (href === null) {
+    return document.createTextNode(shown);
+  }
+  const link = textElement("a", shown);
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+
+/**
+ * Unix seconds as a local date and time.
+ *
+ * @example
+ * timestamp(1_800_000_000); // e.g. "15/01/2027, 10:40:00"
+ */
+function timestamp(seconds: number): string {
+  return new Date(seconds * 1000).toLocaleString();
 }
 
 if (root !== null) {

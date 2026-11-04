@@ -65,3 +65,61 @@ button.link {
 .form-error:empty {
   display: none;
 }
+
+ul.secrets {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+button.secret {
+  display: grid;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+ul.tags {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+ul.tags li {
+  padding: 0 0.4rem;
+  border: 1px solid currentColor;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1rem;
+}
+
+dt {
+  font-weight: bold;
+  overflow-wrap: anywhere;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.notes {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.masked {
+  letter-spacing: 0.1em;
+}
