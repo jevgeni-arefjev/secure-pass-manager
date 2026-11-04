@@ -1,4 +1,5 @@
-# Builds and tests the workspace on macOS.
+# Builds and tests the workspace on macOS; type-checks, tests and builds the web
+# client before the release build, which embeds it. Cargo steps never need Node.
 name: CI
 
 on:
@@ -28,5 +29,17 @@ jobs:
         run: cargo test --locked
       - name: Slow tests (production KDF)
         run: cargo test --locked -- --ignored
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Client (type-check, test, build)
+        working-directory: web
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run build
       - name: Release build
         run: cargo build --locked --release

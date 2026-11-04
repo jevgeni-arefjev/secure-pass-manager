@@ -1,2 +1,7 @@
 .env
 /target
+# Client bundle: built by `npm run build` in web/, embedded by vault-web's build.rs
+/vault-web/assets/*
+!/vault-web/assets/.gitkeep
+/web/node_modules
+/web/.test-build

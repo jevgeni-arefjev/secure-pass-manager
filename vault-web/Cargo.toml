@@ -1,0 +1,36 @@
+[package]
+name = "vault-web"
+description = "Web front end: HTTPS server for the browser client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Forwards to vault-core's test formats (ADR-0005). Only this crate's dev-dependency
+# below enables it, so a release build can't create test-format vaults.
+insecure-test-kdf = ["vault-core/insecure-test-kdf"]
+
+[dependencies]
+axum = { version = "0.8", features = ["json"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+clap = { version = "4.6", features = ["derive"] }
+dirs = "7"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3.27"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+vault-core = { path = "../vault-core" }
+zeroize = "1.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }
+vault-core = { path = "../vault-core", features = ["insecure-test-kdf"] }
+vault-web = { path = ".", features = ["insecure-test-kdf"] }
