@@ -3,6 +3,7 @@
 //! Errors are `{"error": "<message>"}`, with a `"field"` naming the input at fault for
 //! validation errors. Messages never carry internals.
 
+mod edit;
 mod secrets;
 mod vault;
 
@@ -98,6 +99,22 @@ impl ApiError {
         ends_session: false,
     };
 
+    /// An add was asked for a title that another secret has (ignoring case).
+    pub(crate) const SECRET_EXISTS: Self = Self {
+        status: StatusCode::CONFLICT,
+        message: Cow::Borrowed("a secret with this title already exists"),
+        field: Some("title"),
+        ends_session: false,
+    };
+
+    /// A replace whose body names another title than the path and the stored secret.
+    pub(crate) const TITLE_CHANGED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        message: Cow::Borrowed("the title can't be changed"),
+        field: Some("title"),
+        ends_session: false,
+    };
+
     /// Create was asked for a vaultname that already has a vault.
     pub(crate) const VAULTNAME_TAKEN: Self = Self::fixed(StatusCode::CONFLICT, "vaultname taken");
 
@@ -124,6 +141,21 @@ impl ApiError {
     /// Anything that went wrong on the server; details stay on the server.
     pub(crate) const INTERNAL: Self =
         Self::fixed(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+
+    /// A 400 for a hidden value of request field `field` sent as unchanged, though the
+    /// stored secret has no such hidden value to keep.
+    ///
+    /// ```ignore
+    /// stored.password().ok_or(ApiError::nothing_to_keep("password"))?
+    /// ```
+    pub(crate) const fn nothing_to_keep(field: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: Cow::Borrowed("no stored hidden value to keep unchanged"),
+            field: Some(field),
+            ends_session: false,
+        }
+    }
 
     /// A 400 for the request field `field`, saying what is wrong with it.
     ///
@@ -179,8 +211,11 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/unlock", post(vault::unlock))
         .route("/lock", post(vault::lock))
         .route("/session", get(vault::session))
-        .route("/secrets", get(secrets::list))
-        .route("/secrets/{title}", get(secrets::detail))
+        .route("/secrets", get(secrets::list).post(edit::add))
+        .route(
+            "/secrets/{title}",
+            get(secrets::detail).put(edit::replace).delete(edit::remove),
+        )
         .route("/secrets/{title}/reveal", post(secrets::reveal))
         .fallback(|| async { ApiError::NOT_FOUND })
 }

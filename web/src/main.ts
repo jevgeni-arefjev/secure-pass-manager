@@ -1,5 +1,5 @@
-// Client entry point: the create and unlock pages, and the vault's secret list and
-// secret detail pages.
+// Client entry point: the create and unlock pages, and the vault's secret list,
+// secret detail and add/edit pages.
 //
 // Security: the DOM is built only with createElement/textContent, never innerHTML or
 // other HTML sinks; the CSP's `require-trusted-types-for 'script'` makes any such sink
@@ -9,12 +9,14 @@
 // are cleared once submitted. Hidden fields are masked; one reaches the browser only
 // when Reveal or Copy asks for it (an audited request), and then lives only in the
 // element showing it (until hidden, the page is left, or 30 s) or in the clipboard
-// (cleared after 20 s if possible).
+// (cleared after 20 s if possible). The edit form never holds a stored hidden value:
+// untouched hidden fields are sent as unchanged and kept by the server.
 
 import {
   Api,
   ApiError,
   PASSWORD_FIELD,
+  type SavedSecret,
   type SecretDetail,
   type SecretSummary,
   type SessionInfo,
@@ -22,6 +24,7 @@ import {
 } from "./api.js";
 import { checkNewMasterPassword, parseIdleTimeout } from "./forms.js";
 import { copyThenClear, CLEAR_CLIPBOARD_AFTER_MS, RevealedField } from "./reveal.js";
+import { type CustomFieldValues, editValues, emptyCustomField, emptyValues, secretRequest } from "./secret-form.js";
 import { filterSecrets } from "./secrets.js";
 import { displayText } from "./text.js";
 import { safeHref } from "./url.js";
@@ -54,10 +57,14 @@ const api = new Api(window.fetch.bind(window), () => {
   }
 });
 
-/** A text input or password input with its label and its own error line. */
-interface Field {
-  input: HTMLInputElement;
+/** Anything with its own error line, where a field-level server error is shown. */
+interface ErrorTarget {
   error: HTMLElement;
+}
+
+/** A text input or password input with its label and its own error line. */
+interface Field extends ErrorTarget {
+  input: HTMLInputElement;
   row: HTMLElement;
 }
 
@@ -76,13 +83,24 @@ function field(label: string, name: string, type: string, autocomplete: string):
   const labelElement = document.createElement("label");
   labelElement.htmlFor = input.id;
   labelElement.textContent = label;
-  const error = document.createElement("p");
-  error.className = "field-error";
-  error.setAttribute("role", "alert");
+  const error = fieldErrorLine();
   const row = document.createElement("div");
   row.className = "field";
   row.append(labelElement, input, error);
   return { input, error, row };
+}
+
+/**
+ * An empty error line for one field, announced by screen readers when filled.
+ *
+ * @example
+ * const error = fieldErrorLine();
+ */
+function fieldErrorLine(): HTMLElement {
+  const error = document.createElement("p");
+  error.className = "field-error";
+  error.setAttribute("role", "alert");
+  return error;
 }
 
 /**
@@ -161,6 +179,18 @@ function alertLine(text = ""): HTMLElement {
 }
 
 /**
+ * A notice line, e.g. "Vault locked." above a page.
+ *
+ * @example
+ * children.push(noticeLine("Secret deleted."));
+ */
+function noticeLine(text: string): HTMLElement {
+  const note = textElement("p", text);
+  note.className = "notice";
+  return note;
+}
+
+/**
  * The idle timeout field, prefilled with the default.
  *
  * @example
@@ -179,10 +209,21 @@ function idleField(): Field {
  * @example
  * showError(err, { vaultname }, formError);
  */
-function showError(err: unknown, fields: Record<string, Field>, general: HTMLElement): void {
-  const message = err instanceof ApiError ? err.message : "the server could not be reached";
+function showError(err: unknown, fields: Record<string, ErrorTarget>, general: HTMLElement): void {
+  const message = errorMessage(err);
   const target = err instanceof ApiError && err.field !== undefined ? fields[err.field] : undefined;
   (target?.error ?? general).textContent = message;
+}
+
+/**
+ * What to tell the user about a failed request: the server's message, or that it
+ * could not be reached.
+ *
+ * @example
+ * status.textContent = `Delete failed: ${errorMessage(err)}.`;
+ */
+function errorMessage(err: unknown): string {
+  return err instanceof ApiError ? err.message : "the server could not be reached";
 }
 
 /**
@@ -191,7 +232,7 @@ function showError(err: unknown, fields: Record<string, Field>, general: HTMLEle
  * @example
  * clearErrors([vaultname, password], formError);
  */
-function clearErrors(fields: Field[], general: HTMLElement): void {
+function clearErrors(fields: ErrorTarget[], general: HTMLElement): void {
   for (const { error } of fields) {
     error.textContent = "";
   }
@@ -257,9 +298,7 @@ function showUnlock(notice?: string): void {
   create.addEventListener("click", () => showCreate());
   const children: Node[] = [textElement("h1", "Unlock your vault")];
   if (notice !== undefined) {
-    const note = textElement("p", notice);
-    note.className = "notice";
-    children.push(note);
+    children.push(noticeLine(notice));
   }
   render(...children, form, create);
   vaultname.input.focus();
@@ -386,7 +425,7 @@ function loadVaultPage<T>(load: () => Promise<T>, show: (value: T) => void, onFa
     },
     (err: unknown) => {
       if (generation === pageGeneration && onFailure?.(err) !== true) {
-        const message = err instanceof ApiError ? err.message : "the server could not be reached";
+        const message = errorMessage(err);
         vaultPage(alertLine(`Could not load: ${message}.`));
       }
     },
@@ -434,13 +473,13 @@ function renderList(secrets: SecretSummary[], notice?: string): void {
   };
   search.input.addEventListener("input", update);
   update();
+  const add = button("Add secret", "button");
+  add.addEventListener("click", () => showSecretForm(null));
   const children: Node[] = [];
   if (notice !== undefined) {
-    const note = textElement("p", notice);
-    note.className = "notice";
-    children.push(note);
+    children.push(noticeLine(notice));
   }
-  vaultPage(...children, search.row, empty, list);
+  vaultPage(...children, add, search.row, empty, list);
   search.input.focus();
 }
 
@@ -492,7 +531,7 @@ function tagList(tags: string[]): HTMLUListElement {
 function showDetail(title: string): void {
   loadVaultPage(
     () => api.getSecret(title),
-    renderDetail,
+    (secret) => renderDetail(secret),
     (err) => {
       const gone = err instanceof ApiError && err.status === 404;
       if (gone) {
@@ -505,12 +544,13 @@ function showDetail(title: string): void {
 
 /**
  * Renders one secret: every field that is set, hidden fields masked, the URL as a
- * link only if it is http or https.
+ * link only if it is http or https; with Edit and Delete buttons and an optional
+ * `notice` (e.g. after a save).
  *
  * @example
  * renderDetail(await api.getSecret("GitHub"));
  */
-function renderDetail(secret: SecretDetail): void {
+function renderDetail(secret: SecretDetail, notice?: string): void {
   const fields = document.createElement("dl");
   /**
    * Appends a `label` / `value` pair to the field list.
@@ -560,7 +600,19 @@ function renderDetail(secret: SecretDetail): void {
   const back = button("All secrets", "button");
   back.className = "link";
   back.addEventListener("click", () => showList());
-  vaultPage(back, textElement("h2", displayText(secret.title, false)), fields);
+  const edit = button("Edit", "button");
+  edit.addEventListener("click", () => showSecretForm(secret));
+  const status = alertLine();
+  const remove = button("Delete", "button");
+  remove.addEventListener("click", () => deleteSecret(secret.title, remove, status));
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  actions.append(edit, remove);
+  const children: Node[] = [back];
+  if (notice !== undefined) {
+    children.push(noticeLine(notice));
+  }
+  vaultPage(...children, textElement("h2", displayText(secret.title, false)), actions, status, fields);
   onLeave(() => {
     for (const field of hiddenFields) {
       field.hide();
@@ -652,6 +704,299 @@ function hiddenValue(title: string, field: string, fields: RevealedField[]): HTM
   container.className = "hidden-field";
   container.append(value, toggle, copy, status);
   return container;
+}
+
+/**
+ * Asks to confirm, then deletes the secret titled `title` and shows the list. A
+ * failure is shown in `status`; a secret already gone shows the list too.
+ *
+ * @example
+ * remove.addEventListener("click", () => deleteSecret(secret.title, remove, status));
+ */
+function deleteSecret(title: string, remove: HTMLButtonElement, status: HTMLElement): void {
+  if (!window.confirm(`Delete the secret "${displayText(title, false)}"? This can't be undone.`)) {
+    return;
+  }
+  const generation = pageGeneration;
+  remove.disabled = true;
+  status.textContent = "";
+  api.deleteSecret(title).then(
+    () => {
+      if (generation === pageGeneration) {
+        showList("Secret deleted.");
+      }
+    },
+    (err: unknown) => {
+      if (generation !== pageGeneration) {
+        return;
+      }
+      if (err instanceof ApiError && err.status === 404) {
+        showList("That secret no longer exists.");
+        return;
+      }
+      status.textContent = `Delete failed: ${errorMessage(err)}.`;
+      remove.disabled = false;
+    },
+  );
+}
+
+/** The control for a hidden value in the secret form, and whether it keeps the stored value. */
+interface HiddenControl {
+  element: HTMLElement;
+  isUnchanged: () => boolean;
+}
+
+/**
+ * The control for a hidden value: `input`, or, when `keepStored`, a mask with a Change
+ * button that swaps `input` in (and then calls `onChange`).
+ *
+ * Security: a kept value is never in the browser; the form sends it as unchanged and
+ * the server keeps what it has stored.
+ *
+ * @example
+ * const control = hiddenControl(password.input, secret.has_password);
+ */
+function hiddenControl(input: HTMLInputElement, keepStored: boolean, onChange: () => void = () => {}): HiddenControl {
+  input.remove();
+  const element = document.createElement("span");
+  element.className = "hidden-field";
+  let unchanged = keepStored;
+  if (unchanged) {
+    const kept = textElement("span", "unchanged");
+    kept.className = "hint";
+    const change = button("Change", "button");
+    change.addEventListener("click", () => {
+      unchanged = false;
+      element.replaceChildren(input);
+      onChange();
+      input.focus();
+    });
+    element.append(masked(), kept, change);
+  } else {
+    element.append(input);
+  }
+  return { element, isUnchanged: () => unchanged };
+}
+
+/** One custom field in the secret form: its row, its current values and a way to wipe it. */
+interface CustomFieldRow {
+  row: HTMLElement;
+  values: () => CustomFieldValues;
+  clear: () => void;
+}
+
+/** Numbers the custom field rows, so each input gets a unique ID for its label. */
+let customFieldCount = 0;
+
+/**
+ * A custom field row: name, Hidden checkbox and value (masked while typing if hidden),
+ * and a Remove button calling `onRemove`. A hidden field kept as stored can't be
+ * renamed or made plain until Change is pressed, since the server finds the stored
+ * value by name.
+ *
+ * @example
+ * const row = customFieldRow(emptyCustomField(), () => {});
+ */
+function customFieldRow(initial: CustomFieldValues, onRemove: () => void): CustomFieldRow {
+  customFieldCount += 1;
+  /**
+   * `control` with a label `text` before it, in one span; `suffix` makes its ID unique.
+   *
+   * @example
+   * labelled("Name", name, "name");
+   */
+  const labelled = (text: string, control: HTMLInputElement, suffix: string): HTMLElement => {
+    control.id = `custom-${suffix}-${customFieldCount}`;
+    const label = textElement("label", text);
+    label.htmlFor = control.id;
+    const wrapper = document.createElement("span");
+    wrapper.append(label, control);
+    return wrapper;
+  };
+  const name = document.createElement("input");
+  name.type = "text";
+  name.autocomplete = "off";
+  name.value = initial.name;
+  const hidden = document.createElement("input");
+  hidden.type = "checkbox";
+  hidden.checked = initial.hidden;
+  const value = document.createElement("input");
+  value.autocomplete = "off";
+  value.type = initial.hidden ? "password" : "text";
+  value.value = initial.value;
+  hidden.addEventListener("change", () => {
+    value.type = hidden.checked ? "password" : "text";
+  });
+  name.readOnly = initial.unchanged;
+  hidden.disabled = initial.unchanged;
+  const valueLabel = labelled("Value", value, "value");
+  const control = hiddenControl(value, initial.unchanged, () => {
+    name.readOnly = false;
+    hidden.disabled = false;
+  });
+  valueLabel.append(control.element);
+  const remove = button("Remove", "button");
+  const row = document.createElement("div");
+  row.className = "custom-field";
+  row.append(labelled("Name", name, "name"), labelled("Hidden", hidden, "hidden"), valueLabel, remove);
+  remove.addEventListener("click", () => {
+    value.value = "";
+    row.remove();
+    onRemove();
+  });
+  return {
+    row,
+    values: () => ({ name: name.value, hidden: hidden.checked, value: value.value, unchanged: control.isUnchanged() }),
+    clear: () => {
+      value.value = "";
+    },
+  };
+}
+
+/**
+ * The labelled notes text area with its error line, holding `text`.
+ *
+ * @example
+ * const notes = notesField(values.notes);
+ */
+function notesField(text: string): ErrorTarget & { input: HTMLTextAreaElement; row: HTMLElement } {
+  const input = document.createElement("textarea");
+  input.id = "field-notes";
+  input.name = "notes";
+  input.rows = 4;
+  input.value = text;
+  const label = textElement("label", "Notes (optional)");
+  label.htmlFor = input.id;
+  const error = fieldErrorLine();
+  const row = document.createElement("div");
+  row.className = "field";
+  row.append(label, input, error);
+  return { input, error, row };
+}
+
+/**
+ * Shows the add form (`stored` is `null`) or the edit form for `stored`: title
+ * (read-only when editing), username, password, URL, notes, tags and custom fields.
+ * Saving shows the saved secret; server errors are shown next to their field.
+ *
+ * Security: when editing, hidden fields start as "unchanged" and are sent that way
+ * unless Change is pressed, so the browser never holds a stored hidden value. Typed
+ * hidden values are wiped from the inputs when the page is left. A 401 (e.g. a save
+ * conflict with another session) shows the unlock page through the API client.
+ *
+ * @example
+ * showSecretForm(null);   // add
+ * showSecretForm(secret); // edit
+ */
+function showSecretForm(stored: SecretDetail | null): void {
+  const values = stored === null ? emptyValues() : editValues(stored);
+  const title = field("Title", "title", "text", "off");
+  title.input.value = values.title;
+  title.input.readOnly = stored !== null;
+  const username = field("Username (optional)", "username", "text", "off");
+  username.input.value = values.username;
+  const password = field("Password", "password", "password", "new-password");
+  const passwordControl = hiddenControl(password.input, values.passwordUnchanged);
+  const passwordHint = textElement("p", "Leave empty to have a strong password generated.");
+  passwordHint.className = "hint";
+  password.row.insertBefore(passwordControl.element, password.error);
+  password.row.insertBefore(passwordHint, password.error);
+  const url = field("URL (optional)", "url", "text", "off");
+  url.input.value = values.url;
+  const notes = notesField(values.notes);
+  const tags = field("Tags (comma-separated, optional)", "tags", "text", "off");
+  tags.input.value = values.tags;
+
+  const rows: CustomFieldRow[] = [];
+  const customList = document.createElement("div");
+  /**
+   * Adds a custom field row holding `initial`.
+   *
+   * @example
+   * addRow(emptyCustomField());
+   */
+  const addRow = (initial: CustomFieldValues): void => {
+    const row = customFieldRow(initial, () => rows.splice(rows.indexOf(row), 1));
+    rows.push(row);
+    customList.append(row.row);
+  };
+  values.customFields.forEach(addRow);
+  const addCustom = button("Add custom field", "button");
+  addCustom.addEventListener("click", () => addRow(emptyCustomField()));
+  const customError = fieldErrorLine();
+  const custom = document.createElement("fieldset");
+  custom.append(textElement("legend", "Custom fields"), customList, addCustom, customError);
+
+  const formError = alertLine();
+  const submit = button(stored === null ? "Add secret" : "Save", "submit");
+  const form = document.createElement("form");
+  form.append(title.row, username.row, password.row, url.row, notes.row, tags.row, custom, formError, submit);
+  const targets: Record<string, ErrorTarget> = {
+    title,
+    username,
+    password,
+    url,
+    notes,
+    tags,
+    custom_fields: { error: customError },
+  };
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    clearErrors(Object.values(targets), formError);
+    const request = secretRequest({
+      title: stored?.title ?? title.input.value,
+      username: username.input.value,
+      password: password.input.value,
+      passwordUnchanged: passwordControl.isUnchanged(),
+      url: url.input.value,
+      notes: notes.input.value,
+      tags: tags.input.value,
+      customFields: rows.map((row) => row.values()),
+    });
+    const generation = pageGeneration;
+    submit.disabled = true;
+    (stored === null ? api.addSecret(request) : api.editSecret(request)).then(
+      (saved) => {
+        if (generation === pageGeneration) {
+          renderDetail(saved, savedNotice(saved, stored === null));
+        }
+      },
+      (err: unknown) => {
+        if (generation === pageGeneration) {
+          showError(err, targets, formError);
+          submit.disabled = false;
+        }
+      },
+    );
+  });
+
+  const cancel = button("Cancel", "button");
+  cancel.className = "link";
+  cancel.addEventListener("click", () => (stored === null ? showList() : showDetail(stored.title)));
+  const heading = stored === null ? "Add a secret" : `Edit ${displayText(stored.title, false)}`;
+  vaultPage(cancel, textElement("h2", heading), form);
+  onLeave(() => {
+    password.input.value = "";
+    for (const row of rows) {
+      row.clear();
+    }
+  });
+  (stored === null ? title.input : username.input).focus();
+}
+
+/**
+ * What to say above a secret just saved: added or saved, and whether its password was
+ * generated.
+ *
+ * @example
+ * renderDetail(saved, savedNotice(saved, true)); // "Secret added. A password was generated; …"
+ */
+function savedNotice(saved: SavedSecret, added: boolean): string {
+  const done = added ? "Secret added." : "Secret saved.";
+  return saved.password_generated
+    ? `${done} A password was generated; reveal or copy it below.`
+    : done;
 }
 
 /**

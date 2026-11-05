@@ -131,7 +131,7 @@ impl SecretDetail {
     /// ```ignore
     /// let view = SecretDetail::of(vault.get(&title)?);
     /// ```
-    fn of(secret: &Secret) -> Self {
+    pub(super) fn of(secret: &Secret) -> Self {
         Self {
             fields: SecretFields::of(secret),
             notes: secret.notes().map(str::to_owned),
@@ -343,7 +343,7 @@ fn hidden_value(secret: &Secret, field: &str) -> Result<Zeroizing<String>, Revea
 /// ```ignore
 /// current.with_live_vault(&state.sessions, f).map_err(read_error)?
 /// ```
-fn read_error(err: SessionError) -> ApiError {
+pub(super) fn read_error(err: SessionError) -> ApiError {
     match err {
         SessionError::Locked => ApiError::LOCKED,
         SessionError::SecretNotFound => ApiError::SECRET_NOT_FOUND,

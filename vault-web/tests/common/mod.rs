@@ -181,7 +181,7 @@ impl TestApp {
     }
 
     /// Creates vault `vaultname` with [`PASSWORD`] holding `secrets`, written straight
-    /// through `vault-core` (the API can't add secrets yet), and returns a web session
+    /// through `vault-core` (faster than one request per secret), and returns a web session
     /// unlocked on it.
     ///
     /// ```text
@@ -271,9 +271,40 @@ impl Unlocked {
     /// let response = app.send(alice.post_json("/api/secrets/GitHub/reveal", &json!({"field": "password"}))).await;
     /// ```
     pub fn post_json(&self, path: &str, body: &Value) -> Request<Body> {
-        self.authorize(api(Method::POST, path))
+        self.send_json(Method::POST, path, body)
+    }
+
+    /// A same-origin `PUT path` with `body` as JSON, this session's cookie and CSRF
+    /// token.
+    ///
+    /// ```text
+    /// let response = app.send(alice.put_json("/api/secrets/GitHub", &json!({"title": "GitHub"}))).await;
+    /// ```
+    pub fn put_json(&self, path: &str, body: &Value) -> Request<Body> {
+        self.send_json(Method::PUT, path, body)
+    }
+
+    /// A same-origin `method path` with `body` as JSON, this session's cookie and CSRF
+    /// token.
+    ///
+    /// ```text
+    /// let request = alice.send_json(Method::PUT, "/api/secrets/GitHub", &body);
+    /// ```
+    pub fn send_json(&self, method: Method, path: &str, body: &Value) -> Request<Body> {
+        self.authorize(api(method, path))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// A same-origin `DELETE path` with this session's cookie and CSRF token.
+    ///
+    /// ```text
+    /// let response = app.send(alice.delete("/api/secrets/GitHub")).await;
+    /// ```
+    pub fn delete(&self, path: &str) -> Request<Body> {
+        self.authorize(api(Method::DELETE, path))
+            .body(Body::empty())
             .unwrap()
     }
 

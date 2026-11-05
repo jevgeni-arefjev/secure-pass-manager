@@ -163,3 +163,90 @@ test("revealField posts one field name with the CSRF token and returns that one 
   assert.equal(headers(call)["x-csrf-token"], SESSION.csrf_token);
   assert.deepEqual(JSON.parse(String(call.init.body)), { field: "recovery code" });
 });
+
+/** An api unlocked with {@link SESSION}, whose later calls go to `next`. */
+async function unlockedApi(next: { fetch: typeof fetch }, onLocked: () => void = () => {}): Promise<Api> {
+  const ok = fakeFetch(200, SESSION);
+  let current = ok.fetch;
+  const api = new Api((url, init) => current(url, init), onLocked);
+  await api.unlock({ vaultname: "alice", master_password: "pw" });
+  current = next.fetch;
+  return api;
+}
+
+const SAVED = {
+  title: "GitHub",
+  username: null,
+  url: null,
+  notes: null,
+  tags: [],
+  has_password: true,
+  custom_fields: [],
+  created_at: 1,
+  updated_at: 1,
+  password_generated: true,
+};
+
+test("addSecret posts the secret to /api/secrets with the CSRF token", async () => {
+  const added = fakeFetch(201, SAVED);
+  const api = await unlockedApi(added);
+  const request = { title: "GitHub", tags: [], custom_fields: [] };
+
+  assert.deepEqual(await api.addSecret(request), SAVED);
+  const call = added.calls[0]!;
+  assert.equal(call.url, "/api/secrets");
+  assert.equal(call.init.method, "POST");
+  assert.equal(headers(call)["x-csrf-token"], SESSION.csrf_token);
+  assert.deepEqual(JSON.parse(String(call.init.body)), request);
+});
+
+test("editSecret puts the secret to its percent-encoded title", async () => {
+  const edited = fakeFetch(200, { ...SAVED, title: "my bank / savings", password_generated: false });
+  const api = await unlockedApi(edited);
+  const request = { title: "my bank / savings", password: { unchanged: true as const }, tags: [], custom_fields: [] };
+
+  await api.editSecret(request);
+  const call = edited.calls[0]!;
+  assert.equal(call.url, "/api/secrets/my%20bank%20%2F%20savings");
+  assert.equal(call.init.method, "PUT");
+  assert.equal(headers(call)["x-csrf-token"], SESSION.csrf_token);
+  assert.deepEqual(JSON.parse(String(call.init.body)), request);
+});
+
+test("deleteSecret sends DELETE with the CSRF token and no body", async () => {
+  const deleted = fakeFetch(204, undefined);
+  const api = await unlockedApi(deleted);
+
+  assert.equal(await api.deleteSecret(".."), undefined);
+  const call = deleted.calls[0]!;
+  assert.equal(call.url, "/api/secrets/..%20");
+  assert.equal(call.init.method, "DELETE");
+  assert.equal(headers(call)["x-csrf-token"], SESSION.csrf_token);
+  assert.equal(call.init.body, undefined);
+});
+
+test("a save conflict (401) on a change means locked: onLocked runs", async () => {
+  let locked = 0;
+  const conflict = fakeFetch(401, { error: "vault is locked" });
+  const api = await unlockedApi(conflict, () => locked++);
+
+  await assert.rejects(
+    api.addSecret({ title: "GitLab", tags: [], custom_fields: [] }),
+    (err: unknown) => err instanceof ApiError && err.status === 401,
+  );
+  assert.equal(locked, 1);
+});
+
+test("a 409 on add is an error naming the title field, not a lock", async () => {
+  let locked = 0;
+  const taken = fakeFetch(409, { error: "a secret with this title already exists", field: "title" });
+  const api = await unlockedApi(taken, () => locked++);
+
+  await assert.rejects(api.addSecret({ title: "GitHub", tags: [], custom_fields: [] }), (err: unknown) => {
+    assert.ok(err instanceof ApiError);
+    assert.equal(err.status, 409);
+    assert.equal(err.field, "title");
+    return true;
+  });
+  assert.equal(locked, 0);
+});

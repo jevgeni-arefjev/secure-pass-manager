@@ -135,3 +135,34 @@ dd {
   font-family: ui-monospace, monospace;
   overflow-wrap: anywhere;
 }
+
+textarea {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  resize: vertical;
+}
+
+fieldset {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  border: 1px solid currentColor;
+  border-radius: 0.25rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.custom-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.custom-field > span {
+  display: grid;
+  gap: 0.25rem;
+}
