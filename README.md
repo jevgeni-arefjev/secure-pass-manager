@@ -108,13 +108,36 @@ How the modules map to the specs:
 
 Linux or macOS. Windows is not supported, and no Windows support is planned.
 
-On macOS, install the Xcode Command Line Tools first (they provide the linker): `xcode-select --install`.
+A C toolchain and git. Rust needs a linker, and the `ring` crate (TLS in `vault-web`) needs a C compiler:
+
+```bash
+xcode-select --install                          # macOS: Xcode Command Line Tools
+sudo apt install build-essential curl git       # Debian/Ubuntu
+sudo dnf install gcc curl git                   # Fedora
+```
 
 Rust 1.89 or newer (edition 2024). On a clean machine, install it with [rustup](https://rustup.rs):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
+rustc --version                                 # 1.89 or newer
+```
+
+Node.js 22 or newer, only to build and check the browser client (`web/`); the CLI never needs it. One way is [nvm](https://github.com/nvm-sh/nvm):
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source "$HOME/.nvm/nvm.sh"
+nvm install 22
+node --version                                  # v22 or newer
+```
+
+Then get the code:
+
+```bash
+git clone https://github.com/jevgeni-arefjev/secure-pass-manager.git
+cd secure-pass-manager
 ```
 
 ### CLI

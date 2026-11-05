@@ -26,10 +26,10 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 
 Recorded as ADRs in `docs/adr/`.
 
-These are deliberate design choices that differ from `course-project-requirements.md`. The user will confirm with the instructor whether they are allowed, and change direction if not. Don't "fix" them toward the requirements without asking.
+These are deliberate design choices that differ from `course-project-requirements.md`. All of them are approved by the instructor. Don't "fix" them toward the requirements without asking.
 
-- **Master password storage.** Requirements ask for the master password to be stored as a hash (e.g. bcrypt). Here nothing is stored: unlock derives a KEK with Argon2id and tries to unwrap the vault key, and a failed tag check is a wrong password. This avoids keeping a second offline brute-force target.
-- **Per-user ownership on every record operation.** Requirements imply a shared database with per-record ownership checks. Here each user has a separate vault file, and a session only opens the vault it unlocked, so other users' secrets are never reachable (and wouldn't decrypt anyway). Ownership is enforced once, when the vault file is opened.
+- **Master password storage.** Requirements ask for the master password to be stored as a hash (e.g. bcrypt). Here nothing is stored: unlock derives a KEK with Argon2id and tries to unwrap the vault key, and a failed tag check is a wrong password. This avoids keeping a second offline brute-force target. Approved by the instructor (ADR-0002).
+- **Per-user ownership on every record operation.** Requirements imply a shared database with per-record ownership checks. Here each user has a separate vault file, and a session only opens the vault it unlocked, so other users' secrets are never reachable (and wouldn't decrypt anyway). Ownership is enforced once, when the vault file is opened. Approved by the instructor (ADR-0001).
 - **No SQL, so no parameterized statements.** Requirements name prepared, parameterized statements as the SQL injection defence. Here the vault file is a flat `header ‖ body` file with no query language, so injection is ruled out by design. Approved by the instructor (ADR-0011).
 
 ## General rules

@@ -1,6 +1,6 @@
 # No stored master password hash; unlock by unwrapping the vault key
 
-The master password is never stored, not even as a hash. Unlock derives a KEK with Argon2id and tries to unwrap the vault key; a failed AEAD tag check means a wrong password. A separate hash (e.g. bcrypt, as the course requirements suggest) would be a second offline brute-force target while proving nothing the wrapped key doesn't already prove. This deliberately differs from the course requirements; the instructor still has to confirm it.
+The master password is never stored, not even as a hash. Unlock derives a KEK with Argon2id and tries to unwrap the vault key; a failed AEAD tag check means a wrong password. A separate hash (e.g. bcrypt, as the course requirements suggest) would be a second offline brute-force target while proving nothing the wrapped key doesn't already prove. This deliberately differs from the course requirements. The instructor has approved it.
 
 ## Consequences
 

@@ -5,3 +5,6 @@
 !/vault-web/assets/.gitkeep
 /web/node_modules
 /web/.test-build
+
+ICS0027-checkpoint*
+ICS0022-checkpoint*

@@ -2,7 +2,7 @@
 
 **File location amended by [ADR-0009](0009-each-vault-in-its-own-vault-home.md): the vault file is now `secrets.vault` inside a vault home named after the vaultname. Container amended by [ADR-0011](0011-flat-file-as-vault-file-container.md): a flat file instead of SQLite.**
 
-Each user's vault is its own file, named after its plain vaultname, instead of one shared database with per-record ownership checks. A session only ever opens the vault it unlocked, so another user's secrets are unreachable by construction, and their file wouldn't decrypt anyway. This deliberately differs from the course requirement to "enforce per-user ownership on every record operation", which implies a shared store; the instructor still has to confirm it.
+Each user's vault is its own file, named after its plain vaultname, instead of one shared database with per-record ownership checks. A session only ever opens the vault it unlocked, so another user's secrets are unreachable by construction, and their file wouldn't decrypt anyway. This deliberately differs from the course requirement to "enforce per-user ownership on every record operation", which implies a shared store. The instructor has approved it.
 
 ## Considered Options
 
