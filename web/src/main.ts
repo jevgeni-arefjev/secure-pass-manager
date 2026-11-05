@@ -5,11 +5,13 @@
 // other HTML sinks; the CSP's `require-trusted-types-for 'script'` makes any such sink
 // throw at runtime. Field values are shown through `displayText`, and a secret's URL
 // is a link only for http/https (`safeHref`). Vault data and the CSRF token live in
-// memory only; any 401 wipes them and shows the unlock page. Master password inputs
-// are cleared once submitted. Hidden fields are masked; one reaches the browser only
-// when Reveal or Copy asks for it (an audited request), and then lives only in the
-// element showing it (until hidden, the page is left, or 30 s) or in the clipboard
-// (cleared after 20 s if possible). The edit form never holds a stored hidden value:
+// memory only; any 401 wipes them and shows the unlock page, and an open vault page
+// checks its session every 30 s and when the tab returns, so a session the server
+// ended doesn't leave vault data on screen. Master password inputs are cleared once
+// submitted. Hidden fields are masked; one reaches the browser only when Reveal or
+// Copy asks for it (an audited request), and then lives only in the element showing
+// it (until hidden, the page is left, or 30 s) or in the clipboard (cleared after
+// 20 s if possible). The edit form never holds a stored hidden value:
 // untouched hidden fields are sent as unchanged and kept by the server.
 
 import {
@@ -26,6 +28,7 @@ import { checkNewMasterPassword, parseIdleTimeout } from "./forms.js";
 import { copyThenClear, CLEAR_CLIPBOARD_AFTER_MS, RevealedField } from "./reveal.js";
 import { type CustomFieldValues, editValues, emptyCustomField, emptyValues, secretRequest } from "./secret-form.js";
 import { filterSecrets } from "./secrets.js";
+import { watchSession } from "./session-watch.js";
 import { displayText } from "./text.js";
 import { safeHref } from "./url.js";
 
@@ -49,6 +52,9 @@ let leaveHandlers: (() => void)[] = [];
  * `showUnlock` clears it.
  */
 let session: SessionInfo | null = null;
+
+/** Stops the periodic session check; set while a vault is open. */
+let stopWatchingSession: (() => void) | null = null;
 
 /** The vault-web API; a 401 while a vault is open wipes it and shows the unlock page. */
 const api = new Api(window.fetch.bind(window), () => {
@@ -260,14 +266,16 @@ function unlockRequest(vaultname: Field, password: Field, idle: Field): UnlockRe
 }
 
 /**
- * Shows the unlock page, with an optional `notice` (e.g. after an auto-lock), and
- * forgets the session.
+ * Shows the unlock page, with an optional `notice` (e.g. after an auto-lock), forgets
+ * the session and stops checking it.
  *
  * @example
  * showUnlock("Your vault was locked.");
  */
 function showUnlock(notice?: string): void {
   session = null;
+  stopWatchingSession?.();
+  stopWatchingSession = null;
   const vaultname = field("Vaultname", "vaultname", "text", "username");
   const password = field("Master password", "master_password", "password", "current-password");
   const idle = idleField();
@@ -359,14 +367,16 @@ function showCreate(): void {
 }
 
 /**
- * Shows the unlocked vault's secret list; the entry point after create, unlock and a
- * page load with a live session.
+ * Shows the unlocked vault's secret list and starts checking the session; the entry
+ * point after create, unlock and a page load with a live session.
  *
  * @example
  * api.unlock(request).then(showVault);
  */
 function showVault(info: SessionInfo): void {
   session = info;
+  stopWatchingSession?.();
+  stopWatchingSession = watchSession(() => api.session(), document);
   showList();
 }
 

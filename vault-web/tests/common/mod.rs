@@ -28,10 +28,13 @@ pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; 
 /// A master password the core policy accepts.
 pub const PASSWORD: &str = "correct horse battery";
 
-/// A clock that only moves when told to (sleeping moves it too).
+/// A clock that only moves when told to (sleeping moves it too), and can be made to
+/// panic, to make a request panic mid-way.
 pub struct ManualClock {
     start: Instant,
     elapsed: Mutex<Duration>,
+    /// Counts down on each [`Clock::now`] call; the call taking it from 1 to 0 panics.
+    panic_countdown: Mutex<usize>,
 }
 
 impl ManualClock {
@@ -44,7 +47,19 @@ impl ManualClock {
         Self {
             start: Instant::now(),
             elapsed: Mutex::new(Duration::ZERO),
+            panic_countdown: Mutex::new(0),
         }
+    }
+
+    /// Makes the `nth` [`Clock::now`] call from here panic (once), e.g. inside a
+    /// request handler. In a request with a session, call 1 is the session lookup and
+    /// call 2 runs with the session's vault locked.
+    ///
+    /// ```text
+    /// app.clock.panic_on_now_call(1);
+    /// ```
+    pub fn panic_on_now_call(&self, nth: usize) {
+        *self.panic_countdown.lock().unwrap() = nth;
     }
 
     /// The time advanced so far.
@@ -58,8 +73,18 @@ impl ManualClock {
 }
 
 impl Clock for ManualClock {
-    /// The start instant plus the time advanced so far.
+    /// The start instant plus the time advanced so far; panics instead if armed by
+    /// [`ManualClock::panic_on_now_call`].
     fn now(&self) -> Instant {
+        let fire = {
+            let mut countdown = self.panic_countdown.lock().unwrap();
+            let fire = *countdown == 1;
+            *countdown = countdown.saturating_sub(1);
+            fire
+        };
+        if fire {
+            panic!("test clock panicked on purpose");
+        }
         self.start + self.elapsed()
     }
 
@@ -80,6 +105,7 @@ pub struct TestApp {
     dir: TempDir,
     pub config: AppConfig,
     pub clock: Arc<ManualClock>,
+    app: vault_web::App,
     router: Router,
 }
 
@@ -123,11 +149,13 @@ impl TestApp {
             ("app.css", b"body{}".to_vec()),
         ]);
         setup(&mut config);
-        let router = vault_web::app(config.clone());
+        let app = vault_web::App::new(config.clone());
+        let router = app.router();
         Self {
             dir,
             config,
             clock,
+            app,
             router,
         }
     }
@@ -148,6 +176,42 @@ impl TestApp {
     /// ```
     pub fn router(&self) -> Router {
         self.router.clone()
+    }
+
+    /// Runs one sweep: ends every session past its idle timeout or lifetime.
+    ///
+    /// ```text
+    /// app.sweep();
+    /// ```
+    pub fn sweep(&self) {
+        self.app.sweep();
+    }
+
+    /// Starts the periodic sweeper task, every `config.sweep_interval`.
+    ///
+    /// ```text
+    /// let sweeper = app.spawn_sweeper();
+    /// ```
+    pub fn spawn_sweeper(&self) -> tokio::task::JoinHandle<()> {
+        self.app.spawn_sweeper()
+    }
+
+    /// Locks every session, as on SIGINT/SIGTERM.
+    ///
+    /// ```text
+    /// app.lock_all();
+    /// ```
+    pub fn lock_all(&self) {
+        self.app.lock_all();
+    }
+
+    /// How many sessions the app holds.
+    ///
+    /// ```text
+    /// assert_eq!(app.session_count(), 0);
+    /// ```
+    pub fn session_count(&self) -> usize {
+        self.app.session_count()
     }
 
     /// The audit log of `vaultname`, as written by `vault-core::audit::FileSink`.

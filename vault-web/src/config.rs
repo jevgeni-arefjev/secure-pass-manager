@@ -14,6 +14,10 @@ use crate::assets::Assets;
 /// Absolute session lifetime: a session ends this long after unlock, whatever its activity.
 pub const DEFAULT_SESSION_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
 
+/// How often the sweeper ends sessions past their idle timeout or lifetime. Well
+/// under the shortest idle timeout (1 minute), so keys don't outlive it by much.
+pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
 /// How many unlocks or creates may derive keys at once (256 MiB Argon2id each).
 pub const DEFAULT_KDF_CONCURRENCY: usize = 2;
 
@@ -95,7 +99,7 @@ impl Default for KdfLimits {
 ///
 /// ```
 /// let config = vault_web::AppConfig::new("/tmp/web-vaults", 8443);
-/// let _app = vault_web::app(config);
+/// let _app = vault_web::App::new(config);
 /// ```
 #[derive(Clone)]
 pub struct AppConfig {
@@ -107,6 +111,8 @@ pub struct AppConfig {
     pub kdf_limits: KdfLimits,
     /// Absolute session lifetime, whatever the activity.
     pub session_lifetime: Duration,
+    /// How often the sweeper runs ([`crate::App::spawn_sweeper`]).
+    pub sweep_interval: Duration,
     /// The port the server is reached on; only `localhost:<port>` and
     /// `127.0.0.1:<port>` are accepted as `Host`.
     pub port: u16,
@@ -118,7 +124,7 @@ pub struct AppConfig {
 
 impl AppConfig {
     /// The production config for a server reached on `port` with vaults in `vault_dir`:
-    /// the system clock, default limits and lifetime, the production vault format and
+    /// the system clock, default limits, lifetime and sweep interval, the production vault format and
     /// the client bundle embedded at compile time.
     ///
     /// ```
@@ -131,6 +137,7 @@ impl AppConfig {
             clock: Arc::new(SystemClock),
             kdf_limits: KdfLimits::default(),
             session_lifetime: DEFAULT_SESSION_LIFETIME,
+            sweep_interval: DEFAULT_SWEEP_INTERVAL,
             port,
             create_format: CreateFormat::default(),
             assets: Assets::embedded(),

@@ -9,10 +9,12 @@
 //! - The registry is keyed by the SHA-256 of the session ID, never the ID itself, so
 //!   lookups never compare the secret and logs can carry a short hash of it.
 //! - A session that has auto-locked (idle timeout) or outlived the absolute lifetime is
-//!   removed and wiped on its next lookup.
+//!   removed and wiped on its next lookup, or by the periodic sweep, whichever comes
+//!   first.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -31,6 +33,27 @@ const TAG_BYTES: usize = 4;
 /// The OS random number generator failed; no session can be issued.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RandomnessFailed;
+
+/// Why [`Sessions::insert`] registered no session. The vault it was given is locked
+/// and wiped either way.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InsertRefused {
+    /// The OS random number generator failed.
+    Randomness,
+    /// [`Sessions::lock_all`] ran: the server is stopping.
+    Stopping,
+}
+
+impl From<RandomnessFailed> for InsertRefused {
+    /// A randomness failure while issuing the session.
+    ///
+    /// ```ignore
+    /// let id = SessionId::generate()?; // in a fn returning Result<_, InsertRefused>
+    /// ```
+    fn from(_: RandomnessFailed) -> Self {
+        Self::Randomness
+    }
+}
 
 /// A session ID as the browser sends it: 64 lowercase hex digits.
 ///
@@ -192,6 +215,18 @@ impl WebSession {
         }
     }
 
+    /// Locks the vault and wipes its keys because the server is stopping, recorded in
+    /// the audit log as a termination signal; later calls do nothing.
+    ///
+    /// ```ignore
+    /// session.lock_on_signal();
+    /// ```
+    fn lock_on_signal(&self) {
+        if let Some(session) = self.vault().take() {
+            session.lock_on_signal();
+        }
+    }
+
     /// Whether the session may still be used at `now`: unlocked (not auto-locked by
     /// its idle timeout) and younger than `lifetime`.
     ///
@@ -221,6 +256,9 @@ impl WebSession {
 /// ```
 pub(crate) struct Sessions {
     map: Mutex<HashMap<SessionKey, Arc<WebSession>>>,
+    /// Set by [`Sessions::lock_all`]; written and read only under the `map` lock, so
+    /// no insert can slip in after it.
+    stopping: AtomicBool,
     clock: Arc<dyn Clock>,
     lifetime: Duration,
 }
@@ -234,12 +272,17 @@ impl Sessions {
     pub(crate) fn new(clock: Arc<dyn Clock>, lifetime: Duration) -> Self {
         Self {
             map: Mutex::default(),
+            stopping: AtomicBool::new(false),
             clock,
             lifetime,
         }
     }
 
     /// Registers the unlocked `vault` under a fresh session ID and CSRF token.
+    ///
+    /// Security: once [`Sessions::lock_all`] has run, `vault` is locked at once
+    /// (recorded as a termination signal) instead, so an unlock that finished while the
+    /// server was stopping can't leave a vault open.
     ///
     /// ```ignore
     /// let (id, session) = sessions.insert(vault, idle_timeout)?;
@@ -248,7 +291,7 @@ impl Sessions {
         &self,
         vault: Session<FileStore>,
         idle_timeout: Duration,
-    ) -> Result<(SessionId, Arc<WebSession>), RandomnessFailed> {
+    ) -> Result<(SessionId, Arc<WebSession>), InsertRefused> {
         let id = SessionId::generate()?;
         let session = Arc::new(WebSession {
             vaultname: vault.vaultname().clone(),
@@ -257,7 +300,13 @@ impl Sessions {
             created: self.clock.now(),
             idle_timeout,
         });
-        self.map().insert(id.key(), session.clone());
+        let mut map = self.map();
+        if self.stopping.load(Ordering::SeqCst) {
+            drop(map);
+            session.lock_on_signal();
+            return Err(InsertRefused::Stopping);
+        }
+        map.insert(id.key(), session.clone());
         Ok((id, session))
     }
 
@@ -287,6 +336,61 @@ impl Sessions {
         if let Some(session) = removed {
             session.lock();
         }
+    }
+
+    /// Ends every session that has auto-locked or outlived the absolute lifetime:
+    /// removes it and wipes its keys. Returns how many ended.
+    ///
+    /// Blocks while a request holds a session's vault; run it on the blocking pool.
+    ///
+    /// ```ignore
+    /// let ended = sessions.sweep();
+    /// ```
+    pub(crate) fn sweep(&self) -> usize {
+        let snapshot: Vec<_> = self
+            .map()
+            .iter()
+            .map(|(key, session)| (*key, Arc::clone(session)))
+            .collect();
+        let now = self.clock.now();
+        let mut ended = 0;
+        for (key, session) in snapshot {
+            if !session.is_alive(now, self.lifetime) {
+                self.remove(key);
+                ended += 1;
+            }
+        }
+        ended
+    }
+
+    /// Removes every session and wipes its keys, recorded as a termination signal in
+    /// each vault's audit log, and refuses every later insert. Returns how many were
+    /// open.
+    ///
+    /// Blocks while a request holds a session's vault; run it on the blocking pool.
+    ///
+    /// ```ignore
+    /// sessions.lock_all(); // on SIGTERM
+    /// ```
+    pub(crate) fn lock_all(&self) -> usize {
+        let drained: Vec<_> = {
+            let mut map = self.map();
+            self.stopping.store(true, Ordering::SeqCst);
+            map.drain().map(|(_, session)| session).collect()
+        };
+        for session in &drained {
+            session.lock_on_signal();
+        }
+        drained.len()
+    }
+
+    /// How many sessions are registered, live or not yet swept.
+    ///
+    /// ```ignore
+    /// let open = sessions.len();
+    /// ```
+    pub(crate) fn len(&self) -> usize {
+        self.map().len()
     }
 
     /// The session map; recovered if a panicking request poisoned it, since every

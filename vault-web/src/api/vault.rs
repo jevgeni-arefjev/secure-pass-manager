@@ -27,7 +27,7 @@ use crate::api::ApiError;
 use crate::auth::{self, CurrentSession};
 use crate::json::{MasterPasswordField, StrictJson};
 use crate::kdf_limiter::KdfRejected;
-use crate::sessions::WebSession;
+use crate::sessions::{InsertRefused, WebSession};
 use crate::{AppState, SessionTag};
 
 /// Allowed idle timeouts, in minutes.
@@ -71,7 +71,7 @@ impl<'a> SessionInfo<'a> {
 ///
 /// Errors: 400 with `field` for an invalid vaultname, a weak master password or an
 /// idle timeout out of range; 409 if the vaultname is taken; 503 when the KDF limiter
-/// is saturated.
+/// is saturated or the server is stopping.
 ///
 /// ```text
 /// POST /api/vaults {"vaultname": "alice", "master_password": "...", "idle_timeout_minutes": 10}
@@ -110,7 +110,7 @@ pub(crate) async fn create(
 ///
 /// Errors: 400 for a malformed body or an idle timeout out of range; otherwise every
 /// failure is the same 401 after at least [`MIN_UNLOCK_FAILURE`]; 503 when the KDF
-/// limiter is saturated.
+/// limiter is saturated or the server is stopping.
 ///
 /// ```text
 /// POST /api/unlock {"vaultname": "alice", "master_password": "..."}
@@ -173,7 +173,7 @@ pub(crate) async fn session(current: CurrentSession) -> Response {
 
 /// Registers the unlocked `vault` as a new session and builds the response: `status`,
 /// the new cookie and the session info. A session the request's cookie named is
-/// locked and removed first.
+/// locked and removed first. 503 if the server is stopping (the vault is locked).
 ///
 /// Security: always a new session ID, so a cookie planted or held before unlock is
 /// never accepted afterwards (session fixation).
@@ -191,10 +191,14 @@ fn open_session(
     if let Some(previous) = auth::request_session_id(headers) {
         state.sessions.remove(previous.key());
     }
-    let (id, session) = state
-        .sessions
-        .insert(vault, idle_timeout)
-        .map_err(|_| ApiError::INTERNAL)?;
+    let (id, session) =
+        state
+            .sessions
+            .insert(vault, idle_timeout)
+            .map_err(|refused| match refused {
+                InsertRefused::Stopping => ApiError::STOPPING,
+                InsertRefused::Randomness => ApiError::INTERNAL,
+            })?;
     let mut response = (
         status,
         [(header::SET_COOKIE, auth::session_cookie(&id))],

@@ -138,6 +138,10 @@ impl ApiError {
         "server busy, try again shortly",
     );
 
+    /// The server is stopping; an unlock or create that finished meanwhile was locked.
+    pub(crate) const STOPPING: Self =
+        Self::fixed(StatusCode::SERVICE_UNAVAILABLE, "server is stopping");
+
     /// Anything that went wrong on the server; details stay on the server.
     pub(crate) const INTERNAL: Self =
         Self::fixed(StatusCode::INTERNAL_SERVER_ERROR, "internal error");

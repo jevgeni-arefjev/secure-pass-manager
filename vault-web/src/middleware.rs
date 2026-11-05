@@ -1,16 +1,20 @@
-//! Middleware applied to every request: request logging, the Host and Origin checks
-//! and security headers on every response.
+//! Middleware applied to every request: request logging, panic catching, the Host and
+//! Origin checks and security headers on every response.
 
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderName, HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt;
 
 use crate::api::ApiError;
 use crate::auth::{is_state_changing, request_session_id};
-use crate::{AppConfig, SessionTag};
+use crate::sessions::Sessions;
+use crate::{AppConfig, SessionTag, auth};
 
 /// The Content Security Policy from `web-app-security.md`: same-origin code only, no
 /// inline script or style, no framing, and Trusted Types for every DOM sink.
@@ -134,6 +138,41 @@ fn is_same_origin(request: &Request) -> bool {
     match (host, origin) {
         (Some(host), Some(origin)) => origin.eq_ignore_ascii_case(host),
         _ => false,
+    }
+}
+
+/// Catches a panic anywhere below it (handler, extractor or inner middleware) and
+/// answers a generic 500 instead of dropping the connection. The session the request's
+/// cookie named is removed and locked, and the response deletes the cookie.
+///
+/// Security: a request that panicked may have left its session's vault half-used, so
+/// the session ends rather than staying open. The response and the log carry no
+/// panic message (it could hold request data); only an `event = "request_panicked"`
+/// line, plus whatever the process panic hook prints.
+///
+/// ```ignore
+/// router.layer(axum::middleware::from_fn_with_state(sessions, catch_panic))
+/// ```
+pub(crate) async fn catch_panic(
+    State(sessions): State<Arc<Sessions>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let key = request_session_id(request.headers()).map(|id| id.key());
+    match AssertUnwindSafe(next.run(request)).catch_unwind().await {
+        Ok(response) => response,
+        Err(_) => {
+            tracing::error!(event = "request_panicked");
+            let mut response = ApiError::INTERNAL.into_response();
+            if let Some(key) = key {
+                // On the blocking pool: locking waits for any other request of this
+                // session to release the vault (a mutex poisoned by the panic is
+                // recovered).
+                let _ = tokio::task::spawn_blocking(move || sessions.remove(key)).await;
+                response.headers_mut().extend(auth::ended_session_headers());
+            }
+            response
+        }
     }
 }
 
