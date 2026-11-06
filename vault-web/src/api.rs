@@ -5,8 +5,10 @@
 //! `{"error", "fields": [{"field", "index"?, "part"?, "message"}]}`. Messages never
 //! carry internals or request values.
 
+mod audit_log;
 mod edit;
 mod secrets;
+mod settings;
 mod vault;
 
 use std::borrow::Cow;
@@ -17,7 +19,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Serialize;
+use vault_core::session::SessionError;
 
+use crate::kdf_limiter::KdfRejected;
 use crate::{AppState, auth};
 
 /// An API error: a status and a message safe to show the user.
@@ -149,6 +153,15 @@ impl ApiError {
     /// the session stays open. Shown on the form, like a field error.
     pub(crate) const VAULT_FULL: Self = Self::fixed(StatusCode::PAYLOAD_TOO_LARGE, "vault is full");
 
+    /// A master password change was given a wrong current master password.
+    pub(crate) const WRONG_MASTER_PASSWORD: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        message: Cow::Borrowed("wrong master password"),
+        field: Some("current_master_password"),
+        fields: Vec::new(),
+        ends_session: false,
+    };
+
     /// Create was asked for a vaultname that already has a vault.
     pub(crate) const VAULTNAME_TAKEN: Self = Self::fixed(StatusCode::CONFLICT, "vaultname taken");
 
@@ -228,6 +241,32 @@ impl ApiError {
     }
 }
 
+/// Maps a failure reading the vault: locked is 401 (ending the session in the browser),
+/// an unknown title 404, anything else a generic 500.
+///
+/// ```ignore
+/// current.with_live_vault(&state.sessions, f).map_err(read_error)?
+/// ```
+pub(crate) fn read_error(err: SessionError) -> ApiError {
+    match err {
+        SessionError::Locked => ApiError::LOCKED,
+        SessionError::SecretNotFound => ApiError::SECRET_NOT_FOUND,
+        _ => ApiError::INTERNAL,
+    }
+}
+
+/// Maps a KDF limiter refusal: 503 when busy, 500 if the job failed.
+///
+/// ```ignore
+/// state.kdf.run(job).await.map_err(kdf_error)?
+/// ```
+pub(crate) fn kdf_error(rejected: KdfRejected) -> ApiError {
+    match rejected {
+        KdfRejected::Busy => ApiError::BUSY,
+        KdfRejected::Failed => ApiError::INTERNAL,
+    }
+}
+
 /// The JSON body of an error response.
 #[derive(Serialize)]
 struct ErrorBody<'a> {
@@ -280,5 +319,8 @@ pub(crate) fn router() -> Router<AppState> {
             get(secrets::detail).put(edit::replace).delete(edit::remove),
         )
         .route("/secrets/{title}/reveal", post(secrets::reveal))
+        .route("/master-password", post(settings::change_master_password))
+        .route("/backup", post(settings::backup))
+        .route("/audit-log", get(audit_log::read))
         .fallback(|| async { ApiError::NOT_FOUND })
 }

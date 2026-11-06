@@ -1,9 +1,17 @@
-// Client-side checks for the create and unlock forms. The server checks everything
-// again; these only catch mistakes before a costly key derivation.
+// Client-side checks for the create, unlock and change master password forms. The
+// server checks everything again; these only catch mistakes before a costly key
+// derivation.
 
 /** Allowed idle timeouts, in whole minutes (the server enforces the same range). */
 const MIN_IDLE_MINUTES = 1;
 const MAX_IDLE_MINUTES = 60;
+
+/** Fewest and most characters a new master password may have, as `vault-core` counts them. */
+export const MIN_MASTER_PASSWORD_CHARS = 12;
+const MAX_MASTER_PASSWORD_CHARS = 1024;
+
+/** A control character (Unicode Cc), as Rust's `char::is_control` sees it. */
+const CONTROL = /\p{Cc}/u;
 
 const IDLE_TIMEOUT_ERROR = `idle timeout must be ${MIN_IDLE_MINUTES}-${MAX_IDLE_MINUTES} minutes`;
 
@@ -32,10 +40,37 @@ export function parseIdleTimeout(text: string): IdleTimeout {
 }
 
 /**
- * Checks the two master password entries of the create form: `null` if they are
- * usable, else the message to show. Strength is checked by the server's policy.
+ * Checks a new master password as it is typed: `null` if it passes, else the rule it
+ * breaks, worded as the server words it. Mirrors `vault-core`'s `check_master_password`
+ * (12-1024 characters after NFC, no control characters) except its list of common
+ * passwords, which only the server checks.
  *
- * Security: the message never contains either entry.
+ * Security: the message never contains the password.
+ *
+ * @example
+ * masterPasswordProblem("hunter2"); // "master password must be at least 12 characters"
+ * masterPasswordProblem("correct horse battery"); // null
+ */
+export function masterPasswordProblem(password: string): string | null {
+  const chars = [...password.normalize("NFC")].length;
+  if (chars < MIN_MASTER_PASSWORD_CHARS) {
+    return `master password must be at least ${MIN_MASTER_PASSWORD_CHARS} characters`;
+  }
+  if (chars > MAX_MASTER_PASSWORD_CHARS) {
+    return `master password must be at most ${MAX_MASTER_PASSWORD_CHARS} characters`;
+  }
+  if (CONTROL.test(password)) {
+    return "master password must not contain control characters";
+  }
+  return null;
+}
+
+/**
+ * Checks a new master password and its repetition on submit: `null` if they are
+ * usable, else the message to show. Run {@link masterPasswordProblem} on the new
+ * master password before asking for the repetition.
+ *
+ * Security: the message never contains either password.
  *
  * @example
  * checkNewMasterPassword("correct horse battery", "correct horse batter"); // "master passwords don't match"

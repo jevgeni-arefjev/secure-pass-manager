@@ -1,0 +1,22 @@
+{
+  "_comment": "Every audit event kind and how the audit log shows it, read by the CLI's render tests and the web client's audit log tests so both word events alike. Each line is how one event reads after its time.",
+  "events": [
+    { "event": { "kind": "vault_created" }, "shown": "vault created" },
+    { "event": { "kind": "unlocked" }, "shown": "unlocked" },
+    { "event": { "kind": "unlock_failed" }, "shown": "unlock failed (wrong master password)" },
+    { "event": { "kind": "locked" }, "shown": "locked" },
+    { "event": { "kind": "auto_locked" }, "shown": "locked (idle)" },
+    { "event": { "kind": "locked_on_conflict" }, "shown": "locked (changed by another session)" },
+    { "event": { "kind": "terminated_by_signal" }, "shown": "locked (terminated by signal)" },
+    { "event": { "kind": "secret_added", "title": "GitHub" }, "shown": "secret added" },
+    { "event": { "kind": "secret_replaced", "title": "GitHub" }, "shown": "secret replaced" },
+    { "event": { "kind": "secret_removed", "title": "GitHub" }, "shown": "secret removed" },
+    { "event": { "kind": "secret_revealed", "title": "GitHub" }, "shown": "secret revealed" },
+    { "event": { "kind": "master_password_changed" }, "shown": "master password changed" },
+    {
+      "event": { "kind": "master_password_change_failed" },
+      "shown": "master password change failed (wrong current password)"
+    },
+    { "event": { "kind": "backup_created", "revision": 7 }, "shown": "backup created (revision 7)" }
+  ]
+}

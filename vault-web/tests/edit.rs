@@ -5,21 +5,10 @@
 mod common;
 
 use axum::body::Body;
-use axum::http::{Method, Response, StatusCode, header};
+use axum::http::{Method, StatusCode, header};
 use common::*;
 use serde_json::{Value, json};
 use vault_core::session::{Clock, FILLER_TITLE};
-
-/// The JSON body of a response, asserting its status and the security headers.
-///
-/// ```text
-/// let body = expect(app.send(request).await, StatusCode::CREATED).await;
-/// ```
-async fn expect(response: Response<Body>, status: StatusCode) -> Value {
-    assert_eq!(response.status(), status);
-    assert_security_headers(response.headers());
-    body_json(response).await
-}
 
 #[tokio::test]
 async fn adds_a_secret() {

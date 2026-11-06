@@ -24,11 +24,10 @@ use vault_core::session::{
 };
 use vault_core::storage::{FileStore, Vaultname};
 
-use crate::api::ApiError;
+use crate::api::{ApiError, kdf_error};
 use crate::auth::{self, CurrentSession};
 use crate::json::{MasterPasswordField, StrictJson};
-use crate::kdf_limiter::KdfRejected;
-use crate::sessions::{InsertRefused, WebSession};
+use crate::sessions::{IssueRefused, Issued, WebSession};
 use crate::{AppState, SessionTag};
 
 /// Allowed idle timeouts, in minutes.
@@ -217,14 +216,27 @@ fn open_session(
     if let Some(previous) = auth::request_session_id(headers) {
         state.sessions.remove(previous.key());
     }
-    let (id, session) =
-        state
-            .sessions
-            .insert(vault, idle_timeout)
-            .map_err(|refused| match refused {
-                InsertRefused::Stopping => ApiError::STOPPING,
-                InsertRefused::Randomness => ApiError::INTERNAL,
-            })?;
+    let issued = state.sessions.insert(vault, idle_timeout);
+    issued_session(issued, status)
+}
+
+/// The response handing a newly issued session to the browser: `status`, the cookie
+/// with its ID and its [`SessionInfo`]; 503 if the server is stopping, 401 if the
+/// session to reissue had ended, 500 if no ID could be made (a session being reissued
+/// is locked then, so its next request is a 401).
+///
+/// ```ignore
+/// issued_session(state.sessions.reissue(current.key()), StatusCode::OK)
+/// ```
+pub(super) fn issued_session(
+    issued: Result<Issued, IssueRefused>,
+    status: StatusCode,
+) -> Result<Response, ApiError> {
+    let (id, session) = issued.map_err(|refused| match refused {
+        IssueRefused::Stopping => ApiError::STOPPING,
+        IssueRefused::Ended => ApiError::LOCKED,
+        IssueRefused::Randomness => ApiError::INTERNAL,
+    })?;
     let mut response = (
         status,
         [(header::SET_COOKIE, auth::session_cookie(&id))],
@@ -285,17 +297,5 @@ fn error_field(err: &SessionError) -> &'static str {
     match err {
         SessionError::InvalidVaultname => "vaultname",
         _ => "master_password",
-    }
-}
-
-/// Maps a KDF limiter refusal: 503 when busy, 500 if the job failed.
-///
-/// ```ignore
-/// state.kdf.run(job).await.map_err(kdf_error)?
-/// ```
-fn kdf_error(rejected: KdfRejected) -> ApiError {
-    match rejected {
-        KdfRejected::Busy => ApiError::BUSY,
-        KdfRejected::Failed => ApiError::INTERNAL,
     }
 }

@@ -86,7 +86,7 @@ _Avoid_: shell (on its own, that is the user's OS shell), REPL, console
 ### Audit
 
 **Audit log**:
-The record of a vault's audit events, kept in its vault home and readable by its owner from the vault shell; it never holds a field value.
+The record of a vault's audit events, kept in its vault home and readable by its owner during a session on that vault; it never holds a field value.
 _Avoid_: activity log, history (that is the vault shell's command history)
 
 **Audit event**:

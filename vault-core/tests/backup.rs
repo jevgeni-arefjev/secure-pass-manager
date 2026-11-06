@@ -442,3 +442,72 @@ fn a_backup_after_passwd_opens_with_the_new_master_password_only() {
     );
     assert!(fx.unlock("restored", new).is_ok());
 }
+
+// --- Session::backup_file -------------------------------------------------------------
+
+#[test]
+fn backup_file_is_the_stored_vault_file_byte_for_byte_with_its_revision() {
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    session.save(Secret::new("GitHub")).unwrap();
+
+    let file = session.backup_file().unwrap();
+    assert_eq!(file.revision(), 1);
+    assert_eq!(
+        file.bytes(),
+        fs::read(fx.vaults.path().join("alice/secrets.vault")).unwrap()
+    );
+    assert_eq!(
+        fx.events().last(),
+        Some(&Event::BackupCreated { revision: 1 })
+    );
+}
+
+#[test]
+fn backup_file_that_does_not_open_with_the_vault_key_is_refused() {
+    let fx = Fixture::new();
+    let armed = Arc::new(AtomicBool::new(false));
+    let mut session = fx.create_on(CorruptingStore {
+        inner: fx.store(),
+        armed: Arc::clone(&armed),
+    });
+    armed.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        session.backup_file().err(),
+        Some(SessionError::Backup(BackupError::Unverified))
+    );
+    assert!(!fx.events().contains(&Event::BackupCreated { revision: 0 }));
+    assert!(session.is_unlocked());
+}
+
+#[test]
+fn backup_file_of_a_vault_saved_by_another_session_locks_this_one() {
+    let fx = Fixture::new();
+    fx.create().lock();
+    let mut first = fx.unlock("alice", PASSWORD).unwrap();
+    let mut second = fx.unlock("alice", PASSWORD).unwrap();
+    first.save(Secret::new("GitHub")).unwrap();
+
+    assert_eq!(second.backup_file().err(), Some(SessionError::Conflict));
+    assert!(!second.is_unlocked());
+    assert_eq!(fx.events().last(), Some(&Event::LockedOnConflict));
+}
+
+#[test]
+fn backup_file_restored_by_hand_unlocks_with_the_same_secrets() {
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    session
+        .save(Secret::new("GitHub").with_username("alice"))
+        .unwrap();
+    let file = session.backup_file().unwrap();
+    session.lock();
+
+    let home = fx.vaults.path().join("bob");
+    fs::create_dir(&home).unwrap();
+    fs::write(home.join("secrets.vault"), file.bytes()).unwrap();
+
+    let mut restored = fx.unlock("bob", PASSWORD).unwrap();
+    assert_eq!(restored.get("github").unwrap().username(), Some("alice"));
+}

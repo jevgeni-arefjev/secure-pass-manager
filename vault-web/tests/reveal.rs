@@ -45,17 +45,6 @@ fn reveal(session: &Unlocked, path_title: &str, field: &str) -> axum::http::Requ
     )
 }
 
-/// The JSON body of a response, asserting its status and the security headers.
-///
-/// ```text
-/// let body = expect(app.send(request).await, StatusCode::OK).await;
-/// ```
-async fn expect(response: axum::http::Response<Body>, status: StatusCode) -> Value {
-    assert_eq!(response.status(), status);
-    assert_security_headers(response.headers());
-    body_json(response).await
-}
-
 #[tokio::test]
 async fn reveals_the_password() {
     let app = TestApp::new();

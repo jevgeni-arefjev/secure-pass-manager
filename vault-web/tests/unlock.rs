@@ -3,8 +3,7 @@
 
 mod common;
 
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -16,15 +15,6 @@ use vault_core::session::Clock;
 /// A session ID that looks real but was never issued, as an attacker would plant it.
 const PLANTED: &str =
     "__Host-session=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
-/// The unlock request body for `vaultname` and `password`.
-///
-/// ```text
-/// app.send(post_json("/api/unlock", &unlock_body("alice", "wrong"))).await
-/// ```
-fn unlock_body(vaultname: &str, password: &str) -> serde_json::Value {
-    json!({"vaultname": vaultname, "master_password": password})
-}
 
 #[tokio::test]
 async fn created_vault_is_returned_unlocked() {
@@ -523,42 +513,9 @@ async fn non_json_body_is_refused() {
     }
 }
 
-/// A manual clock whose `sleep` first reports that it was entered, then blocks until
-/// released: a failed unlock sleeping in it holds its KDF slot as long as a test wants.
-struct GateClock {
-    clock: ManualClock,
-    entered: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Mutex<mpsc::Receiver<()>>,
-}
-
-impl Clock for GateClock {
-    /// The manual clock's time.
-    fn now(&self) -> Instant {
-        self.clock.now()
-    }
-
-    /// The manual clock's Unix time.
-    fn unix_time(&self) -> u64 {
-        self.clock.unix_time()
-    }
-
-    /// Reports entry, waits for a release, then advances the manual clock.
-    fn sleep(&self, duration: Duration) {
-        let _ = self.entered.send(());
-        let _ = self.release.lock().unwrap().recv();
-        self.clock.sleep(duration);
-    }
-}
-
 #[tokio::test]
 async fn unlocks_beyond_the_kdf_limit_are_turned_away_with_503() {
-    let (entered_tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
-    let (release, release_rx) = mpsc::channel();
-    let clock = Arc::new(GateClock {
-        clock: ManualClock::new(),
-        entered: entered_tx,
-        release: Mutex::new(release_rx),
-    });
+    let (clock, mut entered, release) = GateClock::new();
     let app = TestApp::with_setup(|config| {
         config.clock = clock;
         config.kdf_limits.concurrency = 1;

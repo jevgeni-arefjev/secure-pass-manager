@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -34,21 +34,27 @@ const TAG_BYTES: usize = 4;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RandomnessFailed;
 
-/// Why [`Sessions::insert`] registered no session. The vault it was given is locked
-/// and wiped either way.
+/// A session just issued (by [`Sessions::insert`] or [`Sessions::reissue`]): the ID to
+/// hand to the browser and the session itself.
+pub(crate) type Issued = (SessionId, Arc<WebSession>);
+
+/// Why [`Sessions::insert`] or [`Sessions::reissue`] issued no session. The vault
+/// concerned is locked and wiped either way.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum InsertRefused {
+pub(crate) enum IssueRefused {
     /// The OS random number generator failed.
     Randomness,
     /// [`Sessions::lock_all`] ran: the server is stopping.
     Stopping,
+    /// The session to reissue had already ended (reissue only).
+    Ended,
 }
 
-impl From<RandomnessFailed> for InsertRefused {
+impl From<RandomnessFailed> for IssueRefused {
     /// A randomness failure while issuing the session.
     ///
     /// ```ignore
-    /// let id = SessionId::generate()?; // in a fn returning Result<_, InsertRefused>
+    /// let id = SessionId::generate()?; // in a fn returning Result<_, IssueRefused>
     /// ```
     fn from(_: RandomnessFailed) -> Self {
         Self::Randomness
@@ -140,9 +146,42 @@ pub(crate) struct WebSession {
     created: Instant,
     /// The idle timeout the session was unlocked with.
     idle_timeout: Duration,
+    /// Wrong current master passwords given to a master password change in a row; a
+    /// right one reissues the session, which starts the count over.
+    wrong_master_passwords: AtomicU32,
 }
 
 impl WebSession {
+    /// A session holding the unlocked `vault`, opened at `created`.
+    ///
+    /// ```ignore
+    /// let session = WebSession::new(vault, csrf_token, clock.now(), idle_timeout);
+    /// ```
+    fn new(
+        vault: Session<FileStore>,
+        csrf_token: Zeroizing<String>,
+        created: Instant,
+        idle_timeout: Duration,
+    ) -> Self {
+        Self {
+            vaultname: vault.vaultname().clone(),
+            vault: Mutex::new(Some(vault)),
+            csrf_token,
+            created,
+            idle_timeout,
+            wrong_master_passwords: AtomicU32::new(0),
+        }
+    }
+
+    /// Counts one more wrong current master password in a row and returns the count.
+    ///
+    /// ```ignore
+    /// if session.count_wrong_master_password() >= 3 { sessions.remove(key) }
+    /// ```
+    pub(crate) fn count_wrong_master_password(&self) -> u32 {
+        self.wrong_master_passwords.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     /// The vaultname this session unlocked.
     ///
     /// ```ignore
@@ -294,20 +333,86 @@ impl Sessions {
         &self,
         vault: Session<FileStore>,
         idle_timeout: Duration,
-    ) -> Result<(SessionId, Arc<WebSession>), InsertRefused> {
+    ) -> Result<Issued, IssueRefused> {
         let id = SessionId::generate()?;
-        let session = Arc::new(WebSession {
-            vaultname: vault.vaultname().clone(),
-            vault: Mutex::new(Some(vault)),
-            csrf_token: random_hex()?,
-            created: self.clock.now(),
+        let session = Arc::new(WebSession::new(
+            vault,
+            random_hex()?,
+            self.clock.now(),
             idle_timeout,
-        });
+        ));
+        self.register(id, session)
+    }
+
+    /// Moves the session under `key` to a fresh session ID and CSRF token, keeping its
+    /// vault, idle timeout and absolute lifetime; the old ID and token stop working.
+    ///
+    /// Security: used after a master password change, like the new ID unlock issues,
+    /// so a cookie or token taken before the change is useless afterwards. The old
+    /// session is removed whatever happens: if no new ID or token can be made, it is
+    /// locked rather than left usable under the old ones.
+    ///
+    /// ```ignore
+    /// let (id, session) = sessions.reissue(current.key())?;
+    /// ```
+    pub(crate) fn reissue(&self, key: SessionKey) -> Result<Issued, IssueRefused> {
+        let fresh = SessionId::generate().and_then(|id| Ok((id, random_hex()?)));
+        let old = self.map().remove(&key).ok_or(IssueRefused::Ended)?;
+        let Ok((id, csrf_token)) = fresh else {
+            old.lock();
+            return Err(IssueRefused::Randomness);
+        };
+        let vault = old.vault().take().ok_or(IssueRefused::Ended)?;
+        let session = Arc::new(WebSession::new(
+            vault,
+            csrf_token,
+            old.created,
+            old.idle_timeout,
+        ));
+        self.register(id, session)
+    }
+
+    /// Locks and removes every session on `vaultname` but the one under `keep`.
+    /// Returns how many were locked.
+    ///
+    /// Security: used after a master password change, so no other web session keeps
+    /// the old vault key. A session whose unlock is still deriving keys is registered
+    /// after this runs and is not reached; it locks on its next save or backup, as on
+    /// any conflict.
+    ///
+    /// Blocks while a request holds one of their vaults; run it on the blocking pool.
+    ///
+    /// ```ignore
+    /// sessions.lock_others(session.vaultname(), current.key());
+    /// ```
+    pub(crate) fn lock_others(&self, vaultname: &Vaultname, keep: SessionKey) -> usize {
+        let others: Vec<_> = {
+            let mut map = self.map();
+            let keys: Vec<_> = map
+                .iter()
+                .filter(|(key, session)| **key != keep && session.vaultname == *vaultname)
+                .map(|(key, _)| *key)
+                .collect();
+            keys.iter().filter_map(|key| map.remove(key)).collect()
+        };
+        for session in &others {
+            session.lock();
+        }
+        others.len()
+    }
+
+    /// Adds `session` under `id`, unless the server is stopping: then the session is
+    /// locked at once, recorded as a termination signal.
+    ///
+    /// ```ignore
+    /// self.register(id, session)
+    /// ```
+    fn register(&self, id: SessionId, session: Arc<WebSession>) -> Result<Issued, IssueRefused> {
         let mut map = self.map();
         if self.stopping.load(Ordering::SeqCst) {
             drop(map);
             session.lock_on_signal();
-            return Err(InsertRefused::Stopping);
+            return Err(IssueRefused::Stopping);
         }
         map.insert(id.key(), session.clone());
         Ok((id, session))

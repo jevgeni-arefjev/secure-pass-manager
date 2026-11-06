@@ -28,7 +28,8 @@ use vault_core::session::{
 use vault_core::storage::FileStore;
 
 use crate::AppState;
-use crate::api::secrets::{SecretDetail, read_error};
+use crate::api::read_error;
+use crate::api::secrets::SecretDetail;
 use crate::api::{ApiError, FieldError};
 use crate::auth::CurrentSession;
 use crate::json::StrictJson;

@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 use chrono::DateTime;
 
 use crate::audit::{AuditSink, Event, Line, Record};
-use crate::backup::{self, BackupError, Destination};
+use crate::backup::{self, BackupError, BackupFile, Destination};
 use crate::crypto::{self, CryptoError, Header, MasterPassword, Plaintext, SealedVault, VaultKey};
 use crate::storage::{StorageError, VaultStore, Vaultname};
 
@@ -825,11 +825,7 @@ impl<S: VaultStore> Session<S> {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn backup(&mut self, dest: &Destination) -> Result<u64, SessionError> {
-        let held = self.vault()?.header.clone();
-        let stored = self.store.load(&self.vaultname)?;
-        if stored.header != held {
-            return Err(self.lock_on_conflict());
-        }
+        let stored = self.stored_as_held()?;
         let staged = backup::stage(dest, &stored)?;
         let key = &self.open.as_ref().expect("checked unlocked above").key;
         // The decrypted body is only checked, never kept: dropping it wipes it.
@@ -843,6 +839,64 @@ impl<S: VaultStore> Session<S> {
         let revision = stored.header.revision();
         self.record(Event::BackupCreated { revision });
         Ok(revision)
+    }
+
+    /// Returns a backup of this vault whole, e.g. for a browser to download, instead of
+    /// writing it to a [`Destination`]; the backup is recorded as made once it is
+    /// handed out.
+    ///
+    /// Security: the vault file is returned as stored, never decrypted for output,
+    /// after the same checks as [`Session::backup`]: it must be the revision this
+    /// session holds (else the session locks, [`SessionError::Conflict`], so the backup
+    /// always opens with the master password this session was unlocked with) and must
+    /// open with this session's vault key ([`BackupError::Unverified`] otherwise; the
+    /// decrypted body is only checked, then wiped).
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
+    /// # use vault_core::crypto::MasterPassword;
+    /// # use vault_core::session::{Session, SessionConfig};
+    /// # use vault_core::storage::FileStore;
+    /// # let dir = tempfile::tempdir()?;
+    /// # let password = MasterPassword::new("correct horse battery".into());
+    /// let mut session = Session::create_insecure_for_tests(
+    ///     FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    /// )?;
+    /// let file = session.backup_file()?;
+    /// assert_eq!(file.revision(), 0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn backup_file(&mut self) -> Result<BackupFile, SessionError> {
+        let stored = self.stored_as_held()?;
+        let key = &self.open.as_ref().expect("checked unlocked above").key;
+        // The decrypted body is only checked, never kept: dropping it wipes it.
+        if crypto::open_body(key, &stored).is_err() {
+            return Err(BackupError::Unverified.into());
+        }
+        let file = BackupFile::of(&stored);
+        self.record(Event::BackupCreated {
+            revision: file.revision(),
+        });
+        Ok(file)
+    }
+
+    /// The vault file as stored, if it is the revision this session holds.
+    ///
+    /// Security: otherwise the session locks as on a save conflict
+    /// ([`SessionError::Conflict`]), so a backup always opens with the master password
+    /// this session was unlocked with.
+    ///
+    /// ```ignore
+    /// let stored = self.stored_as_held()?;
+    /// ```
+    fn stored_as_held(&mut self) -> Result<SealedVault, SessionError> {
+        let held = self.vault()?.header.clone();
+        let stored = self.store.load(&self.vaultname)?;
+        if stored.header != held {
+            return Err(self.lock_on_conflict());
+        }
+        Ok(stored)
     }
 
     /// Locks the vault: ends the session and wipes its keys and secrets.

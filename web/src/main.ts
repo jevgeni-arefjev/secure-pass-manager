@@ -1,5 +1,6 @@
 // Client entry point: the create and unlock pages, and the vault's secret list,
-// secret detail and add/edit pages.
+// secret detail, add/edit, settings (change master password, download backup) and
+// audit log pages.
 //
 // Security: the DOM is built only with createElement/textContent, never innerHTML or
 // other HTML sinks; the CSP's `require-trusted-types-for 'script'` makes any such sink
@@ -12,7 +13,8 @@
 // Copy asks for it (an audited request), and then lives only in the element showing
 // it (until hidden, the page is left, or 30 s) or in the clipboard (cleared after
 // 20 s if possible). The edit form never holds a stored hidden value:
-// untouched hidden fields are sent as unchanged and kept by the server.
+// untouched hidden fields are sent as unchanged and kept by the server. A backup
+// reaches the browser only as the encrypted vault file, handed straight to a download.
 
 import {
   Api,
@@ -24,7 +26,13 @@ import {
   type SessionInfo,
   type UnlockRequest,
 } from "./api.js";
-import { checkNewMasterPassword, parseIdleTimeout } from "./forms.js";
+import { auditRow, type AuditEvent } from "./audit-log.js";
+import {
+  checkNewMasterPassword,
+  masterPasswordProblem,
+  MIN_MASTER_PASSWORD_CHARS,
+  parseIdleTimeout,
+} from "./forms.js";
 import { copyThenClear, CLEAR_CLIPBOARD_AFTER_MS, RevealedField } from "./reveal.js";
 import {
   type CustomFieldErrors,
@@ -49,6 +57,12 @@ const root = document.getElementById("app");
 
 /** What every hidden field is shown as; its length says nothing about the value. */
 const MASK = "••••••••";
+
+/** Audit events the audit log page loads at first, and how many more each "Show more" adds. */
+const AUDIT_LOG_PAGE = 20;
+
+/** The most audit events the server sends: `vault-web`'s cap on `limit` (`MAX_LIMIT`). */
+const AUDIT_LOG_MAX = 1000;
 
 /** Bumped on every page change, so a response for an earlier page is dropped. */
 let pageGeneration = 0;
@@ -254,6 +268,60 @@ function clearErrors(fields: ErrorTarget[], general: HTMLElement): void {
   general.textContent = "";
 }
 
+/** A new master password typed twice, checked against the rules as it is typed. */
+interface NewMasterPassword {
+  password: Field;
+  confirmation: Field;
+}
+
+/**
+ * The new master password field and its "again" field. The first is checked as it is
+ * typed ({@link masterPasswordProblem}), its error shown under it; the second stays
+ * disabled (and is emptied) until the first passes, as the CLI asks to repeat only a
+ * password that passed.
+ *
+ * @example
+ * const { password, confirmation } = newMasterPasswordFields("master_password", "Master password");
+ */
+function newMasterPasswordFields(name: string, label: string): NewMasterPassword {
+  const password = field(`${label} (at least ${MIN_MASTER_PASSWORD_CHARS} characters)`, name, "password", "new-password");
+  const confirmation = field(`${label} again`, `confirm_${name}`, "password", "new-password");
+  confirmation.input.disabled = true;
+  password.input.addEventListener("input", () => {
+    const typed = password.input.value;
+    const problem = typed === "" ? null : masterPasswordProblem(typed);
+    password.error.textContent = problem ?? "";
+    const passes = typed !== "" && problem === null;
+    if (!passes) {
+      confirmation.input.value = "";
+      confirmation.error.textContent = "";
+    }
+    confirmation.input.disabled = !passes;
+  });
+  return { password, confirmation };
+}
+
+/**
+ * Checks a {@link NewMasterPassword} on submit: shows the rule it breaks or the
+ * mismatch and returns `false`, else `true`.
+ *
+ * @example
+ * if (!newMasterPasswordReady(fresh)) return;
+ */
+function newMasterPasswordReady({ password, confirmation }: NewMasterPassword): boolean {
+  const problem = masterPasswordProblem(password.input.value);
+  if (password.input.value !== "" && problem !== null) {
+    password.error.textContent = problem;
+    return false;
+  }
+  const mismatch = checkNewMasterPassword(password.input.value, confirmation.input.value);
+  if (mismatch !== null) {
+    (password.input.value === "" ? password : confirmation).error.textContent = mismatch;
+    return false;
+  }
+  return true;
+}
+
 /**
  * The create or unlock request from the form values; `null` (with the error shown) if
  * the idle timeout is invalid.
@@ -332,8 +400,8 @@ function showCreate(): void {
   const hint = textElement("p", "1-32 letters, digits, - or _, starting with a letter or digit.");
   hint.className = "hint";
   vaultname.row.insertBefore(hint, vaultname.error);
-  const password = field("Master password (at least 12 characters)", "master_password", "password", "new-password");
-  const confirmation = field("Master password again", "confirm_master_password", "password", "new-password");
+  const fresh = newMasterPasswordFields("master_password", "Master password");
+  const { password, confirmation } = fresh;
   const idle = idleField();
   const formError = alertLine();
   const submit = button("Create vault", "submit");
@@ -344,9 +412,7 @@ function showCreate(): void {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     clearErrors(fields, formError);
-    const mismatch = checkNewMasterPassword(password.input.value, confirmation.input.value);
-    if (mismatch !== null) {
-      confirmation.error.textContent = mismatch;
+    if (!newMasterPasswordReady(fresh)) {
       return;
     }
     const request = unlockRequest(vaultname, password, idle);
@@ -355,6 +421,7 @@ function showCreate(): void {
     }
     password.input.value = "";
     confirmation.input.value = "";
+    confirmation.input.disabled = true;
     submit.disabled = true;
     api
       .createVault(request)
@@ -413,8 +480,20 @@ function vaultPage(...content: Node[]): void {
       },
     );
   });
+  const nav = document.createElement("nav");
+  for (const [label, show] of [
+    ["Secrets", () => showList()],
+    ["Settings", () => showSettings()],
+    ["Audit log", () => showAuditLog()],
+  ] as const) {
+    const link = button(label, "button");
+    link.className = "link";
+    link.addEventListener("click", show);
+    nav.append(link);
+  }
+  nav.append(lock);
   const header = document.createElement("header");
-  header.append(textElement("h1", session.vaultname), lock);
+  header.append(textElement("h1", session.vaultname), nav);
   const minutes = session.idle_timeout_minutes;
   const idle = textElement("p", `Locks itself after ${minutes} idle minute${minutes === 1 ? "" : "s"}.`);
   idle.className = "hint";
@@ -1121,6 +1200,197 @@ function urlValue(url: string): Node {
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   return link;
+}
+
+/**
+ * Shows the settings page: change the master password, and download a backup, with an
+ * optional `notice` above them.
+ *
+ * @example
+ * showSettings("Master password changed.");
+ */
+function showSettings(notice?: string): void {
+  const children: Node[] = [];
+  if (notice !== undefined) {
+    children.push(noticeLine(notice));
+  }
+  vaultPage(...children, changeMasterPasswordForm(), backupSection());
+}
+
+/**
+ * The change master password form: the current one, and the new one twice. On success
+ * the server reissues the session, and the settings page is shown again with a notice;
+ * three wrong current master passwords in a row lock the vault.
+ *
+ * Security: every master password input is cleared once the form is submitted.
+ *
+ * @example
+ * vaultPage(changeMasterPasswordForm());
+ */
+function changeMasterPasswordForm(): HTMLElement {
+  const current = field("Current master password", "current_master_password", "password", "current-password");
+  const fresh = newMasterPasswordFields("new_master_password", "New master password");
+  const formError = alertLine();
+  const submit = button("Change master password", "submit");
+  const form = document.createElement("form");
+  form.append(current.row, fresh.password.row, fresh.confirmation.row, formError, submit);
+  const fields = [current, fresh.password, fresh.confirmation];
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    clearErrors(fields, formError);
+    if (current.input.value === "") {
+      current.error.textContent = "enter the current master password";
+      return;
+    }
+    if (!newMasterPasswordReady(fresh)) {
+      return;
+    }
+    const typed = current.input.value;
+    const next = fresh.password.input.value;
+    for (const { input } of fields) {
+      input.value = "";
+    }
+    fresh.confirmation.input.disabled = true;
+    submit.disabled = true;
+    const generation = pageGeneration;
+    api.changeMasterPassword(typed, next).then(
+      (info) => {
+        session = info;
+        if (generation === pageGeneration) {
+          showSettings("Master password changed. Other sessions on this vault were locked.");
+        }
+      },
+      (err: unknown) => {
+        if (generation === pageGeneration) {
+          showError(
+            err,
+            { current_master_password: current, new_master_password: fresh.password },
+            formError,
+          );
+          submit.disabled = false;
+        }
+      },
+    );
+  });
+
+  const section = document.createElement("section");
+  section.append(textElement("h2", "Change master password"), form);
+  return section;
+}
+
+/**
+ * The backup section: what a backup is, and a button downloading one.
+ *
+ * @example
+ * vaultPage(backupSection());
+ */
+function backupSection(): HTMLElement {
+  const about = textElement(
+    "p",
+    "A backup is the encrypted vault file as stored. It opens with the master password the vault has now. " +
+      "To restore it, put it in a new vault home as secrets.vault.",
+  );
+  about.className = "hint";
+  const status = alertLine();
+  const download = button("Download backup", "button");
+  download.addEventListener("click", () => {
+    status.textContent = "";
+    download.disabled = true;
+    const generation = pageGeneration;
+    api.downloadBackup().then(
+      (backup) => {
+        saveFile(backup.name, backup.data);
+        if (generation === pageGeneration) {
+          download.disabled = false;
+        }
+      },
+      (err: unknown) => {
+        if (generation === pageGeneration) {
+          status.textContent = `Backup failed: ${errorMessage(err)}.`;
+          download.disabled = false;
+        }
+      },
+    );
+  });
+  const section = document.createElement("section");
+  section.append(textElement("h2", "Backup"), about, status, download);
+  return section;
+}
+
+/**
+ * Hands `data` to the browser as a download named `name`.
+ *
+ * @example
+ * saveFile("alice-r3.vault", blob);
+ */
+function saveFile(name: string, data: Blob): void {
+  const url = URL.createObjectURL(data);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/**
+ * Loads the newest `limit` audit events and shows them.
+ *
+ * @example
+ * showAuditLog();
+ */
+function showAuditLog(limit = AUDIT_LOG_PAGE): void {
+  loadVaultPage(
+    () => api.auditLog(limit),
+    (events) => renderAuditLog(events, limit),
+  );
+}
+
+/**
+ * Renders the audit log as a table, newest first, with "Show more" while the server
+ * may have older events.
+ *
+ * @example
+ * renderAuditLog(await api.auditLog(20), 20);
+ */
+function renderAuditLog(events: AuditEvent[], limit: number): void {
+  const about = textElement("p", "Unlocks, locks, changes, reveals and backups of this vault. Never a field value.");
+  about.className = "hint";
+  if (events.length === 0) {
+    vaultPage(textElement("h2", "Audit log"), about, textElement("p", "No audit events yet."));
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "audit-log";
+  const head = document.createElement("tr");
+  head.append(...["Time", "Event", "Secret"].map((text) => textElement("th", text)));
+  table.createTHead().append(head);
+  const body = table.createTBody();
+  for (const event of events) {
+    const row = auditRow(event, localTime);
+    const tr = document.createElement("tr");
+    tr.append(textElement("td", row.time), textElement("td", row.event), textElement("td", row.title));
+    body.append(tr);
+  }
+  const children: Node[] = [textElement("h2", "Audit log"), about, table];
+  if (events.length === limit && limit < AUDIT_LOG_MAX) {
+    const more = button("Show more", "button");
+    more.addEventListener("click", () => showAuditLog(Math.min(limit + AUDIT_LOG_PAGE, AUDIT_LOG_MAX)));
+    children.push(more);
+  }
+  vaultPage(...children);
+}
+
+/**
+ * An RFC 3339 time as a local date and time.
+ *
+ * @example
+ * localTime("2026-11-06T10:00:00Z"); // e.g. "06/11/2026, 12:00:00"
+ */
+function localTime(iso: string): string {
+  return new Date(iso).toLocaleString();
 }
 
 /**

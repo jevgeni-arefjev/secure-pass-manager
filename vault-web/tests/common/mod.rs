@@ -4,7 +4,7 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex, Once, mpsc};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -96,6 +96,62 @@ impl Clock for ManualClock {
     /// Advances the clock instead of sleeping.
     fn sleep(&self, duration: Duration) {
         *self.elapsed.lock().unwrap() += duration;
+    }
+}
+
+/// A manual clock whose `sleep` first reports that it was entered, then blocks until
+/// released: a failed unlock sleeping in it holds its KDF slot as long as a test wants.
+///
+/// ```text
+/// let (clock, mut entered, release) = GateClock::new();
+/// let app = TestApp::with_setup(|config| config.clock = clock);
+/// // start a failed unlock, then: entered.recv().await; ...; release.send(())
+/// ```
+pub struct GateClock {
+    clock: ManualClock,
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl GateClock {
+    /// A gate clock, the receiver told each time a sleep is entered, and the sender
+    /// releasing one sleep per message (or all, once dropped).
+    ///
+    /// ```text
+    /// let (clock, mut entered, release) = GateClock::new();
+    /// ```
+    pub fn new() -> (
+        Arc<Self>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered) = tokio::sync::mpsc::unbounded_channel();
+        let (release, release_rx) = mpsc::channel();
+        let clock = Arc::new(Self {
+            clock: ManualClock::new(),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        (clock, entered, release)
+    }
+}
+
+impl Clock for GateClock {
+    /// The manual clock's time.
+    fn now(&self) -> Instant {
+        self.clock.now()
+    }
+
+    /// The manual clock's Unix time.
+    fn unix_time(&self) -> u64 {
+        self.clock.unix_time()
+    }
+
+    /// Reports entry, waits for a release, then advances the manual clock.
+    fn sleep(&self, duration: Duration) {
+        let _ = self.entered.send(());
+        let _ = self.release.lock().unwrap().recv();
+        self.clock.sleep(duration);
     }
 }
 
@@ -453,6 +509,26 @@ pub fn get_with_host(path: &str, host: &str) -> Request<Body> {
         .header(header::HOST, host)
         .body(Body::empty())
         .unwrap()
+}
+
+/// The JSON body of a response, asserting its status and the security headers.
+///
+/// ```text
+/// let body = expect(app.send(request).await, StatusCode::OK).await;
+/// ```
+pub async fn expect(response: Response<Body>, status: StatusCode) -> Value {
+    assert_eq!(response.status(), status);
+    assert_security_headers(response.headers());
+    body_json(response).await
+}
+
+/// The create or unlock request body for `vaultname` and `password`.
+///
+/// ```text
+/// app.send(post_json("/api/unlock", &unlock_body("alice", "wrong"))).await
+/// ```
+pub fn unlock_body(vaultname: &str, password: &str) -> Value {
+    json!({"vaultname": vaultname, "master_password": password})
 }
 
 /// The response body as text.

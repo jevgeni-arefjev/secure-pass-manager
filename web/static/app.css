@@ -39,6 +39,17 @@ button {
   padding: 0.4rem 0.6rem;
 }
 
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+}
+
+nav button.link {
+  margin-top: 0;
+}
+
 button.link {
   margin-top: 1rem;
   border: none;
@@ -165,4 +176,24 @@ fieldset {
 .custom-field > span {
   display: grid;
   gap: 0.25rem;
+}
+
+section {
+  margin-top: 1.5rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+table.audit-log {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.audit-log th,
+table.audit-log td {
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  overflow-wrap: anywhere;
 }

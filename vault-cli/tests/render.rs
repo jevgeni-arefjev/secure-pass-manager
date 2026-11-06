@@ -302,3 +302,58 @@ fn audit_log_escapes_titles_from_a_crafted_log() {
 fn empty_audit_log_says_so() {
     assert_eq!(render::audit_log(&[], &Utc).as_str(), "no audit events yet");
 }
+
+/// The shared fixture of every audit event kind and how it is shown, also read by the
+/// web client's tests so both front ends word events alike.
+const AUDIT_EVENTS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../fixtures/audit-events.json"
+));
+
+/// A number per [`Event`] variant; exhaustive, so a new variant breaks the build here
+/// until the fixture covers it.
+///
+/// ```text
+/// assert_eq!(variant(&Event::Locked), 3);
+/// ```
+fn variant(event: &Event) -> usize {
+    match event {
+        Event::VaultCreated => 0,
+        Event::Unlocked => 1,
+        Event::UnlockFailed => 2,
+        Event::Locked => 3,
+        Event::AutoLocked => 4,
+        Event::LockedOnConflict => 5,
+        Event::TerminatedBySignal => 6,
+        Event::SecretAdded { .. } => 7,
+        Event::SecretReplaced { .. } => 8,
+        Event::SecretRemoved { .. } => 9,
+        Event::SecretRevealed { .. } => 10,
+        Event::MasterPasswordChanged => 11,
+        Event::MasterPasswordChangeFailed => 12,
+        Event::BackupCreated { .. } => 13,
+    }
+}
+
+#[test]
+fn audit_log_words_every_event_kind_as_the_shared_fixture() {
+    let fixture: Value = serde_json::from_str(AUDIT_EVENTS).unwrap();
+    let mut seen = Vec::new();
+    for case in fixture["events"].as_array().unwrap() {
+        let event: Event = serde_json::from_value(case["event"].clone()).unwrap();
+        seen.push(variant(&event));
+        let title = event.title().map(|title| format!(" '{title}'"));
+        let line = render::audit_log(&[logged(0, event)], &Utc);
+        let shown = case["shown"].as_str().unwrap();
+        assert_eq!(
+            line.as_str(),
+            format!("1970-01-01 00:00:00  {shown}{}", title.unwrap_or_default())
+        );
+    }
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        (0..14).collect::<Vec<_>>(),
+        "one fixture case per kind"
+    );
+}

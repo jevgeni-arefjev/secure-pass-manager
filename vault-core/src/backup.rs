@@ -227,3 +227,82 @@ impl Staged {
         Ok(())
     }
 }
+
+/// A backup handed out whole instead of written to a [`Destination`], e.g. for a
+/// browser to download: the vault file's bytes (`header ‖ body`) exactly as stored,
+/// and the revision they hold. Made by
+/// [`crate::session::Session::backup_file`], which checks them first.
+///
+/// Security: ciphertext only, like any backup; nothing in it is decrypted.
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use vault_core::audit::MemorySink;
+/// # use vault_core::crypto::MasterPassword;
+/// # use vault_core::session::{Session, SessionConfig};
+/// # use vault_core::storage::FileStore;
+/// # let dir = tempfile::tempdir()?;
+/// # let password = MasterPassword::new("correct horse battery".into());
+/// # let mut session = Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())))?;
+/// let file = session.backup_file()?;
+/// assert_eq!(file.revision(), 0);
+/// assert!(!file.bytes().is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct BackupFile {
+    /// The revision of the vault the backup holds.
+    revision: u64,
+    /// The vault file's bytes.
+    bytes: Vec<u8>,
+}
+
+impl BackupFile {
+    /// The backup of `sealed`: its header encoded as storage writes it, then its body.
+    ///
+    /// ```ignore
+    /// let file = BackupFile::of(&stored);
+    /// ```
+    pub(crate) fn of(sealed: &SealedVault) -> Self {
+        let mut bytes = sealed.header.encode();
+        bytes.extend_from_slice(&sealed.body);
+        Self {
+            revision: sealed.header.revision(),
+            bytes,
+        }
+    }
+
+    /// The revision of the vault the backup holds.
+    ///
+    /// ```ignore
+    /// let name = format!("alice-r{}.vault", file.revision());
+    /// ```
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The vault file's bytes, to save as a vault home's `secrets.vault` on restore.
+    ///
+    /// ```ignore
+    /// std::fs::write(home.join("secrets.vault"), file.bytes())?;
+    /// ```
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl fmt::Debug for BackupFile {
+    /// Shows the revision and size only.
+    ///
+    /// ```ignore
+    /// println!("{file:?}"); // BackupFile { revision: 3, len: 1234 }
+    /// ```
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BackupFile")
+            .field("revision", &self.revision)
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}

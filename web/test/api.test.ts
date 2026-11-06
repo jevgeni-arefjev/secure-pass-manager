@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Api, ApiError } from "../src/api.js";
+import { Api, ApiError, backupFileName } from "../src/api.js";
 
 interface Call {
   url: string;
@@ -286,4 +286,84 @@ test("an error without a fields array has no problems listed", async () => {
     assert.deepEqual(err.fields, []);
     return true;
   });
+});
+
+test("changing the master password posts both, with the CSRF token, and keeps the new token", async () => {
+  const renewed = { ...SESSION, csrf_token: "b".repeat(64) };
+  const answers = [SESSION, renewed, undefined];
+  const calls: Call[] = [];
+  const fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls.push({ url: String(url), init: init ?? {} });
+    const body = answers.shift();
+    return body === undefined ? new Response(null, { status: 204 }) : new Response(JSON.stringify(body), { status: 200 });
+  };
+  const api = new Api(fetch as typeof globalThis.fetch, () => {});
+  await api.unlock({ vaultname: "alice", master_password: "pw" });
+
+  assert.deepEqual(await api.changeMasterPassword("old pw", "new pw"), renewed);
+  const call = calls[1]!;
+  assert.equal(call.url, "/api/master-password");
+  assert.equal(call.init.method, "POST");
+  assert.equal(headers(call)["x-csrf-token"], SESSION.csrf_token);
+  assert.deepEqual(JSON.parse(String(call.init.body)), {
+    current_master_password: "old pw",
+    new_master_password: "new pw",
+  });
+
+  await api.lock();
+  assert.equal(headers(calls[2]!)["x-csrf-token"], renewed.csrf_token);
+});
+
+test("a wrong current master password is a field error, not a lock", async () => {
+  let locked = 0;
+  const { fetch } = fakeFetch(400, { error: "wrong master password", field: "current_master_password" });
+  const api = new Api(fetch, () => locked++);
+  await assert.rejects(
+    api.changeMasterPassword("wrong", "new pw"),
+    (err: unknown) => err instanceof ApiError && err.field === "current_master_password",
+  );
+  assert.equal(locked, 0);
+});
+
+test("the audit log asks for its limit and returns the events", async () => {
+  const events = [{ time: "2026-11-06T10:00:00Z", kind: "unlocked" }];
+  const { fetch, calls } = fakeFetch(200, { events });
+  const api = new Api(fetch, () => {});
+  assert.deepEqual(await api.auditLog(40), events);
+  assert.equal(calls[0]?.url, "/api/audit-log?limit=40");
+  assert.equal(calls[0]?.init.method, "GET");
+});
+
+test("a backup is posted with the CSRF token and returned as bytes with the server's file name", async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const calls: Call[] = [];
+  const fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls.push({ url: String(url), init: init ?? {} });
+    if (String(url) === "/api/unlock") {
+      return new Response(JSON.stringify(SESSION), { status: 200 });
+    }
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="alice-r3.vault"',
+      },
+    });
+  };
+  const api = new Api(fetch as typeof globalThis.fetch, () => {});
+  await api.unlock({ vaultname: "alice", master_password: "pw" });
+
+  const backup = await api.downloadBackup();
+  assert.equal(backup.name, "alice-r3.vault");
+  assert.deepEqual(new Uint8Array(await backup.data.arrayBuffer()), bytes);
+  assert.equal(calls[1]?.url, "/api/backup");
+  assert.equal(calls[1]?.init.method, "POST");
+  assert.equal(headers(calls[1]!)["x-csrf-token"], SESSION.csrf_token);
+});
+
+test("a backup file name is taken only if it is a plain vault file name", () => {
+  assert.equal(backupFileName('attachment; filename="alice-r3.vault"'), "alice-r3.vault");
+  for (const header of [null, "attachment", 'attachment; filename="../etc/passwd"', 'attachment; filename="a/b.vault"']) {
+    assert.equal(backupFileName(header), "vault-backup.vault", String(header));
+  }
 });

@@ -7,6 +7,7 @@
 // in localStorage, sessionStorage or a cookie. The session cookie is HttpOnly and
 // handled by the browser alone.
 
+import type { AuditEvent } from "./audit-log.js";
 import { secretPath } from "./secrets.js";
 
 /** What the server says about an unlocked session. */
@@ -97,6 +98,22 @@ export const PASSWORD_FIELD = "password";
 interface Revealed {
   value: string;
 }
+
+/** A backup as downloaded: the vault file's bytes and the name to save them under. */
+export interface Backup {
+  name: string;
+  data: Blob;
+}
+
+/** The name a backup is saved under when the server's name can't be used. */
+const FALLBACK_BACKUP_NAME = "vault-backup.vault";
+
+/**
+ * A backup file name the server may give: `<vaultname>-r<revision>.vault`. The
+ * vaultname part mirrors `vault-core`'s `Vaultname` rule (1-32 lowercase letters,
+ * digits, `-` or `_`, starting with a letter or digit).
+ */
+const BACKUP_NAME = /^[a-z0-9][a-z0-9_-]{0,31}-r\d{1,20}\.vault$/;
 
 /** Shown when a failed response carries no usable `{"error": ...}` body. */
 const GENERIC_ERROR = "request failed";
@@ -299,6 +316,48 @@ export class Api {
   }
 
   /**
+   * Changes the master password. The server then locks the vault's other sessions and
+   * reissues this one; the new CSRF token is kept. A wrong current master password
+   * rejects with a 400 {@link ApiError} for `current_master_password` (the third in a
+   * row ends the session: a 401, so `onLocked` runs), a new one breaking the rules with
+   * a 400 for `new_master_password`.
+   *
+   * @example
+   * await api.changeMasterPassword(current.input.value, next.input.value);
+   */
+  async changeMasterPassword(current: string, next: string): Promise<SessionInfo> {
+    const info = (await this.#request("POST", "/api/master-password", {
+      current_master_password: current,
+      new_master_password: next,
+    })) as SessionInfo;
+    this.#csrfToken = info.csrf_token;
+    return info;
+  }
+
+  /**
+   * A backup of the vault: its encrypted file exactly as stored, and the name the
+   * server gives it ({@link backupFileName}). The server records it as made.
+   *
+   * @example
+   * const backup = await api.downloadBackup();
+   */
+  async downloadBackup(): Promise<Backup> {
+    const response = await this.#send("POST", "/api/backup");
+    return { name: backupFileName(response.headers.get("content-disposition")), data: await response.blob() };
+  }
+
+  /**
+   * Up to `limit` (1-1000) of the vault's newest audit events, newest first.
+   *
+   * @example
+   * const events = await api.auditLog(20);
+   */
+  async auditLog(limit: number): Promise<AuditEvent[]> {
+    const body = (await this.#request("GET", `/api/audit-log?limit=${limit}`)) as { events: AuditEvent[] };
+    return body.events;
+  }
+
+  /**
    * Posts a create or unlock request and keeps the returned CSRF token.
    *
    * @example
@@ -317,6 +376,18 @@ export class Api {
    * const info = await this.#request("GET", "/api/session");
    */
   async #request(method: string, path: string, body?: unknown): Promise<unknown> {
+    const response = await this.#send(method, path, body);
+    return response.status === 204 ? undefined : await response.json();
+  }
+
+  /**
+   * Sends one request and returns the successful response; a failure throws its
+   * {@link ApiError}, and a 401 (outside unlock) wipes the token and calls `onLocked`.
+   *
+   * @example
+   * const response = await this.#send("POST", "/api/backup");
+   */
+  async #send(method: string, path: string, body?: unknown): Promise<Response> {
     const headers: Record<string, string> = {};
     if (body !== undefined) {
       headers["content-type"] = "application/json";
@@ -330,7 +401,7 @@ export class Api {
     }
     const response = await this.#fetch(path, init);
     if (response.ok) {
-      return response.status === 204 ? undefined : await response.json();
+      return response;
     }
     const error = await errorFrom(response);
     if (response.status === 401) {
@@ -341,6 +412,21 @@ export class Api {
     }
     throw error;
   }
+}
+
+/**
+ * The file name from a backup response's `Content-Disposition`, if it is a plain
+ * `<vaultname>-r<revision>.vault`; anything else (missing, a path) gives a fixed name.
+ *
+ * Security: only a name matching {@link BACKUP_NAME} is used, so a response can't
+ * suggest a path or a misleading file type to save under.
+ *
+ * @example
+ * backupFileName('attachment; filename="alice-r3.vault"'); // "alice-r3.vault"
+ */
+export function backupFileName(disposition: string | null): string {
+  const name = /filename="([^"]*)"/.exec(disposition ?? "")?.[1];
+  return name !== undefined && BACKUP_NAME.test(name) ? name : FALLBACK_BACKUP_NAME;
 }
 
 /**

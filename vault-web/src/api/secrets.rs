@@ -20,7 +20,7 @@ use vault_core::session::{CustomField, FieldValue, Secret, SessionError};
 use zeroize::Zeroizing;
 
 use crate::AppState;
-use crate::api::ApiError;
+use crate::api::{ApiError, read_error};
 use crate::auth::CurrentSession;
 use crate::json::StrictJson;
 
@@ -366,18 +366,4 @@ fn hidden_value(secret: &Secret, field: &str) -> Result<Zeroizing<String>, Revea
         }
     };
     Ok(Zeroizing::new(hidden.reveal().to_owned()))
-}
-
-/// Maps a failure reading the vault: locked is 401 (ending the session in the browser),
-/// an unknown title 404, anything else a generic 500.
-///
-/// ```ignore
-/// current.with_live_vault(&state.sessions, f).map_err(read_error)?
-/// ```
-pub(super) fn read_error(err: SessionError) -> ApiError {
-    match err {
-        SessionError::Locked => ApiError::LOCKED,
-        SessionError::SecretNotFound => ApiError::SECRET_NOT_FOUND,
-        _ => ApiError::INTERNAL,
-    }
 }
