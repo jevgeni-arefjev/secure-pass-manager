@@ -16,7 +16,7 @@ use vault_cli::shell::{self, Env, Exit};
 use vault_cli::terminal::{Terminal, TerminalError, TerminalHandle};
 use vault_core::audit::FileSink;
 use vault_core::crypto::MasterPassword;
-use vault_core::session::{Clock, HiddenValue, Session, SessionConfig};
+use vault_core::session::{self, Clock, HiddenValue, Session, SessionConfig};
 use vault_core::storage::FileStore;
 use zeroize::Zeroizing;
 
@@ -61,6 +61,8 @@ enum Input {
     Hidden(String),
     /// Ctrl-C.
     Interrupt,
+    /// A hidden prompt that the real terminal ended with this error (e.g. a refused paste).
+    HiddenRefused(TerminalError),
     /// Leave the shell idle for this long, then wait until it reports the auto-lock.
     Idle(Duration),
 }
@@ -144,7 +146,9 @@ impl FakeTerminal {
     fn visible(&mut self, prompt: &str) -> Result<Zeroizing<String>, TerminalError> {
         match self.next() {
             Some(Input::Line(line)) => Ok(Zeroizing::new(line)),
-            Some(Input::Hidden(_)) => panic!("hidden value read through visible prompt {prompt:?}"),
+            Some(Input::Hidden(_) | Input::HiddenRefused(_)) => {
+                panic!("hidden input read through visible prompt {prompt:?}")
+            }
             Some(Input::Interrupt) => Err(TerminalError::Interrupted),
             Some(Input::Idle(_)) => unreachable!("handled in next"),
             None => Err(TerminalError::EndOfInput),
@@ -192,6 +196,7 @@ impl Terminal for FakeTerminal {
         self.hidden_prompts.push(prompt.to_owned());
         match self.next() {
             Some(Input::Hidden(value)) => Ok(Zeroizing::new(value)),
+            Some(Input::HiddenRefused(err)) => Err(err),
             Some(Input::Line(line)) => panic!("visible line {line:?} read through hidden prompt"),
             Some(Input::Interrupt) => Err(TerminalError::Interrupted),
             Some(Input::Idle(_)) => unreachable!("handled in next"),
@@ -388,6 +393,17 @@ fn an_unknown_vaultname_fails_like_a_wrong_password() {
     let (_, unknown) = fx.run(&["unlock", "bob"], vec![hidden(PASSWORD)]);
     let (_, wrong) = fx.run(&["unlock", "alice"], vec![hidden("wrong guess")]);
     assert_eq!(unknown.err[0], wrong.err[0]);
+}
+
+#[test]
+fn a_vaultname_with_surrounding_spaces_opens_the_same_vault() {
+    let fx = Fixture::with_alice();
+    let (exit, t) = fx.run(&["unlock", " alice "], vec![hidden(PASSWORD), line("lock")]);
+    assert_eq!(exit, Exit::Success, "{}", t.stderr());
+    assert!(t.out[0].starts_with("vault 'alice' unlocked"));
+    let inputs = vec![line("  alice"), hidden(PASSWORD), line("lock")];
+    let (exit, _) = fx.run(&["unlock"], inputs);
+    assert_eq!(exit, Exit::Success);
 }
 
 #[test]
@@ -611,6 +627,51 @@ fn an_invalid_field_is_reported_and_nothing_is_saved() {
 }
 
 #[test]
+fn a_refused_paste_cancels_save_with_its_message_and_the_shell_goes_on() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("save github"),
+        line("alice"),                                     // username
+        Input::HiddenRefused(TerminalError::PasteTooLong), // password
+        line("list"),
+    ];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    assert!(
+        t.stderr()
+            .contains("pasted text was longer than 1024 characters; nothing was entered"),
+        "{}",
+        t.stderr()
+    );
+    assert!(t.stdout().contains("no secrets yet"));
+}
+
+#[test]
+fn a_full_vault_refuses_a_save_and_the_shell_goes_on() {
+    let fx = Fixture::with_alice();
+    let store = FileStore::new(fx.dir.path()).unwrap();
+    session::fill_vault_for_tests(&store, "alice", &MasterPassword::new(PASSWORD.to_owned()))
+        .unwrap();
+    let mut script = vec![line("save github")];
+    script.extend(save_answers("alice", "s3cret!"));
+    script.push(line("get github"));
+    script.push(line("lock"));
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    assert!(
+        t.stderr().contains("vault: vault is full"),
+        "{}",
+        t.stderr()
+    );
+    assert!(
+        t.stderr().contains("no secret with this title"),
+        "{}",
+        t.stderr()
+    );
+    assert_eq!(t.out.last().unwrap(), "vault locked");
+}
+
+#[test]
 fn list_shows_saved_secrets_without_hidden_fields() {
     let fx = Fixture::with_alice();
     let (_, t) = fx.shell(with_github(vec![line("list")]));
@@ -686,6 +747,27 @@ fn passwd_with_a_wrong_current_password_changes_nothing() {
     assert!(t.stderr().contains("wrong vaultname or master password"));
     let (exit, _) = fx.run(&["unlock", "alice"], vec![hidden(PASSWORD)]);
     assert_eq!(exit, Exit::Success);
+}
+
+#[test]
+fn passwd_refuses_a_new_master_password_with_control_characters() {
+    let fx = Fixture::with_alice();
+    // The real hidden prompt drops control characters; a pasted one could still get
+    // through another front end, so the core rule is checked here too.
+    let script = vec![
+        line("passwd"),
+        hidden(PASSWORD),
+        hidden("tr0ub4dor\u{1b}3 staples"),
+        line("lock"),
+    ];
+    let (_, t) = fx.shell(script);
+    assert!(
+        t.stderr()
+            .contains("master password must not contain control characters"),
+        "{}",
+        t.stderr()
+    );
+    assert!(!t.stderr().contains("tr0ub4dor"));
 }
 
 #[test]

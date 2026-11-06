@@ -12,6 +12,11 @@ use crate::crypto::MasterPassword;
 /// Fewest characters (Unicode scalar values, after NFC) a new master password may have.
 pub const MIN_MASTER_PASSWORD_CHARS: usize = 12;
 
+/// Most characters (Unicode scalar values, after NFC) a new master password may have:
+/// the most the vault shell's hidden prompt takes, so a vault created anywhere can be
+/// unlocked from the CLI.
+pub const MAX_MASTER_PASSWORD_CHARS: usize = 1024;
+
 /// Well-known passwords at least [`MIN_MASTER_PASSWORD_CHARS`] long, compared ignoring
 /// ASCII case. Shorter ones are already refused by length.
 const COMMON_PASSWORDS: &[&str] = &[
@@ -64,6 +69,11 @@ const COMMON_PASSWORDS: &[&str] = &[
 pub enum WeakMasterPassword {
     /// Fewer than [`MIN_MASTER_PASSWORD_CHARS`] characters.
     TooShort,
+    /// More than [`MAX_MASTER_PASSWORD_CHARS`] characters.
+    TooLong,
+    /// Holds a control character (such as a newline, tab or escape), which a hidden
+    /// prompt can't take.
+    ControlCharacter,
     /// One character repeated, or on the built-in list of common passwords.
     TooCommon,
 }
@@ -81,12 +91,22 @@ impl fmt::Display for WeakMasterPassword {
                 f,
                 "master password must be at least {MIN_MASTER_PASSWORD_CHARS} characters"
             ),
+            Self::TooLong => write!(
+                f,
+                "master password must be at most {MAX_MASTER_PASSWORD_CHARS} characters"
+            ),
+            Self::ControlCharacter => {
+                f.write_str("master password must not contain control characters")
+            }
             Self::TooCommon => f.write_str("master password is too common"),
         }
     }
 }
 
-/// Checks that `password` is strong enough to protect a new vault. Exported as
+/// Checks that `password` is strong enough to protect a new vault and can be typed at
+/// any prompt: 12-1024 characters after NFC, no control characters, not too common.
+/// Unlock never runs it, so a vault whose master password predates a rule still opens
+/// and can be given a new one. Exported as
 /// `session::check_master_password` so front ends can reject a weak password before
 /// asking the user to repeat it; `Session::create` and `change_master_password` still
 /// call it themselves.
@@ -105,8 +125,15 @@ impl fmt::Display for WeakMasterPassword {
 /// ```
 pub fn check(password: &MasterPassword) -> Result<(), WeakMasterPassword> {
     let text = std::str::from_utf8(password.as_bytes()).expect("built from a String");
-    if text.chars().count() < MIN_MASTER_PASSWORD_CHARS {
+    let chars = text.chars().count();
+    if chars < MIN_MASTER_PASSWORD_CHARS {
         return Err(WeakMasterPassword::TooShort);
+    }
+    if chars > MAX_MASTER_PASSWORD_CHARS {
+        return Err(WeakMasterPassword::TooLong);
+    }
+    if text.chars().any(char::is_control) {
+        return Err(WeakMasterPassword::ControlCharacter);
     }
     let mut chars = text.chars();
     let first = chars.next();

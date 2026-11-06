@@ -115,6 +115,10 @@ impl ApiError {
         ends_session: false,
     };
 
+    /// A save would make the vault file too large to open again; nothing was saved and
+    /// the session stays open. Shown on the form, like a field error.
+    pub(crate) const VAULT_FULL: Self = Self::fixed(StatusCode::PAYLOAD_TOO_LARGE, "vault is full");
+
     /// Create was asked for a vaultname that already has a vault.
     pub(crate) const VAULTNAME_TAKEN: Self = Self::fixed(StatusCode::CONFLICT, "vaultname taken");
 

@@ -60,9 +60,12 @@ const VAULT_FILE: &str = "secrets.vault";
 /// vault file (ADR-0011). The vault file itself can't be locked: the rename replaces it.
 const LOCK_FILE: &str = "secrets.lock";
 
-/// Largest vault file storage reads, in bytes. Far above any real vault (a few KiB); it
-/// only stops a planted or corrupted file from exhausting memory.
-const MAX_VAULT_FILE_LEN: u64 = 64 * 1024 * 1024;
+/// Largest vault file, in bytes, header included. Far above any real vault (a few KiB).
+///
+/// Security: one limit for both directions. Loading refuses a larger file, so a planted
+/// or corrupted one can't exhaust memory; saving refuses to write one
+/// ([`StorageError::VaultFull`]), so a vault can never grow too large to open again.
+pub const MAX_VAULT_FILE_LEN: u64 = 64 * 1024 * 1024;
 
 /// Prefix and suffix of the temp files a write builds a vault in (`.<random>.tmp`).
 const TEMP_PREFIX: &str = ".";
@@ -96,6 +99,9 @@ pub enum StorageError {
     /// than a header, over the size limit, or a header with the wrong magic or an
     /// unknown format version.
     NotAVault,
+    /// Writing would make the vault file larger than [`MAX_VAULT_FILE_LEN`], so it
+    /// couldn't be opened again. Nothing was written.
+    VaultFull,
     /// The file system failed, or another session held the lock for too long.
     Io,
 }
@@ -116,6 +122,7 @@ impl fmt::Display for StorageError {
             Self::AlreadyExists => "a vault with this vaultname already exists",
             Self::Conflict => "vault was changed by another session",
             Self::NotAVault => "not a vault file",
+            Self::VaultFull => "vault is full",
             Self::Io => "vault storage failed",
         })
     }
@@ -171,7 +178,9 @@ pub trait VaultStore {
 
     /// Replaces the vault stored under `name` with `sealed`, atomically. Succeeds only
     /// if `sealed` is the revision right after the stored one; otherwise
-    /// [`StorageError::Conflict`] and nothing changes.
+    /// [`StorageError::Conflict`] and nothing changes. A `sealed` too large to load
+    /// again ([`MAX_VAULT_FILE_LEN`]) is refused as [`StorageError::VaultFull`], also
+    /// changing nothing; `create` refuses it the same way.
     ///
     /// ```
     /// # use vault_core::crypto::{self, MasterPassword, Plaintext};
@@ -346,6 +355,7 @@ impl VaultStore for FileStore {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn create(&self, name: &Vaultname, sealed: &SealedVault) -> Result<(), StorageError> {
+        check_fits(sealed)?;
         let home = self.home(name);
         create_vault_home(&home).map_err(io_error)?;
         self.check_home(name)?;
@@ -400,6 +410,7 @@ impl VaultStore for FileStore {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn save(&self, name: &Vaultname, sealed: &SealedVault) -> Result<(), StorageError> {
+        check_fits(sealed)?;
         // Checked before locking, so a missing vault leaves no lock file behind.
         self.check_vault_file(name)?;
         let home = self.home(name);
@@ -497,6 +508,20 @@ pub(crate) fn read_sealed(file: File) -> Result<SealedVault, StorageError> {
         return Err(StorageError::NotAVault);
     }
     decode_vault(bytes)
+}
+
+/// Refuses `sealed` as [`StorageError::VaultFull`] if its file would be larger than
+/// [`MAX_VAULT_FILE_LEN`], the most the loader reads back.
+///
+/// ```ignore
+/// check_fits(&sealed)?; // before anything is written
+/// ```
+fn check_fits(sealed: &SealedVault) -> Result<(), StorageError> {
+    let file_len = Header::LEN as u64 + sealed.body.len() as u64;
+    if file_len > MAX_VAULT_FILE_LEN {
+        return Err(StorageError::VaultFull);
+    }
+    Ok(())
 }
 
 /// Splits the bytes of a vault file into its header and body.

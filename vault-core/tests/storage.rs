@@ -8,8 +8,8 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use tempfile::TempDir;
-use vault_core::crypto::{self, MasterPassword, Plaintext, SealedVault, VaultKey};
-use vault_core::storage::{FileStore, StorageError, VaultStore, Vaultname};
+use vault_core::crypto::{self, Header, MasterPassword, Plaintext, SealedVault, VaultKey};
+use vault_core::storage::{FileStore, MAX_VAULT_FILE_LEN, StorageError, VaultStore, Vaultname};
 
 /// A store in a fresh temporary vault directory; keep the `TempDir` alive for the test.
 ///
@@ -130,6 +130,13 @@ fn vaultnames_are_lowercased() {
 }
 
 #[test]
+fn surrounding_whitespace_is_trimmed_from_vaultnames() {
+    assert_eq!(name(" alice").as_str(), "alice");
+    assert_eq!(name("\tAlice  \n").as_str(), "alice");
+    assert_eq!(name(&format!(" {} ", "a".repeat(32))).as_str().len(), 32);
+}
+
+#[test]
 fn vaultnames_allow_digits_dashes_and_underscores() {
     assert_eq!(name("bob-2_work").as_str(), "bob-2_work");
 }
@@ -144,6 +151,7 @@ fn unsafe_or_malformed_vaultnames_are_rejected() {
     let too_long = "a".repeat(33);
     for bad in [
         "",
+        "   ",
         "../alice",
         "a/b",
         "a\\b",
@@ -192,6 +200,57 @@ fn saved_revision_replaces_the_previous_one() {
     let loaded = store.load(&name("alice")).unwrap();
     assert_eq!(loaded, v1);
     assert_eq!(crypto::open_body(&key, &loaded).unwrap().as_bytes(), b"v1");
+}
+
+/// `sealed` with its body replaced by zeros, so the vault file is `file_len` bytes.
+/// Storage never authenticates the body, so it stores and loads such a vault as is.
+///
+/// ```text
+/// let huge = with_file_len(&v1, MAX_VAULT_FILE_LEN);
+/// ```
+fn with_file_len(sealed: &SealedVault, file_len: u64) -> SealedVault {
+    let body_len = usize::try_from(file_len).unwrap() - Header::LEN;
+    SealedVault {
+        header: sealed.header.clone(),
+        body: vec![0; body_len],
+    }
+}
+
+#[test]
+fn a_vault_up_to_the_size_limit_saves_and_loads_back() {
+    let (_dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+    let largest = with_file_len(&next(&key, &v0, "v1"), MAX_VAULT_FILE_LEN);
+    store.save(&name("alice"), &largest).unwrap();
+    assert_eq!(store.load(&name("alice")).unwrap(), largest);
+}
+
+#[test]
+fn a_save_past_the_size_limit_is_refused_and_changes_nothing() {
+    let (_dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+    let too_large = with_file_len(&next(&key, &v0, "v1"), MAX_VAULT_FILE_LEN + 1);
+    assert_eq!(
+        store.save(&name("alice"), &too_large),
+        Err(StorageError::VaultFull)
+    );
+    assert_eq!(store.load(&name("alice")).unwrap(), v0);
+    // The refused revision was never stored, so the next one still follows `v0`.
+    store.save(&name("alice"), &next(&key, &v0, "v1")).unwrap();
+}
+
+#[test]
+fn a_create_past_the_size_limit_is_refused() {
+    let (_dir, store) = store();
+    let (_, v0) = new_vault("v0");
+    let too_large = with_file_len(&v0, MAX_VAULT_FILE_LEN + 1);
+    assert_eq!(
+        store.create(&name("alice"), &too_large),
+        Err(StorageError::VaultFull)
+    );
+    assert_eq!(store.load(&name("alice")), Err(StorageError::NotFound));
 }
 
 #[test]

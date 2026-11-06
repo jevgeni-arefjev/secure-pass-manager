@@ -10,8 +10,8 @@ const MAX_LEN: usize = 32;
 /// A validated vaultname. It can only be built through [`Vaultname::parse`], so every
 /// value is safe to use as a file name inside the vault directory (ADR-0001).
 ///
-/// Security: input is lowercased, then must be 1–32 ASCII letters, digits, `-` or `_`,
-/// starting with a letter or digit. Path separators, dots and Windows device names
+/// Security: input is trimmed of surrounding whitespace and lowercased, then must be
+/// 1–32 ASCII letters, digits, `-` or `_`, starting with a letter or digit. Path separators, dots and Windows device names
 /// (`con`, `nul`, `com1`, ...) can never get through, and two names differing only in
 /// case are the same vault, so case-insensitive file systems can't make them collide.
 ///
@@ -28,15 +28,18 @@ pub struct Vaultname(String);
 impl Vaultname {
     /// Validates `input` and returns it as a lowercase vaultname, or
     /// [`StorageError::InvalidVaultname`] if it breaks the rules on [`Vaultname`].
+    /// Surrounding whitespace is ignored, so every front end opens the same vault for
+    /// `" alice"` and `"alice"`.
     ///
     /// ```
     /// # use vault_core::storage::{StorageError, Vaultname};
     /// assert_eq!(Vaultname::parse("bob-2_work")?.as_str(), "bob-2_work");
+    /// assert_eq!(Vaultname::parse(" alice ")?.as_str(), "alice");
     /// assert_eq!(Vaultname::parse("con"), Err(StorageError::InvalidVaultname));
     /// # Ok::<(), StorageError>(())
     /// ```
     pub fn parse(input: &str) -> Result<Self, StorageError> {
-        let name = input.to_ascii_lowercase();
+        let name = input.trim().to_ascii_lowercase();
         let valid = (1..=MAX_LEN).contains(&name.len())
             && name.starts_with(|c: char| c.is_ascii_alphanumeric())
             && name

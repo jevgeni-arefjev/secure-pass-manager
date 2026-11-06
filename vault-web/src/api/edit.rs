@@ -247,8 +247,9 @@ const CUSTOM_FIELDS: &str = "custom_fields";
 /// An absent or empty password is generated on the server.
 ///
 /// Errors: 409 (`"field": "title"`) if a secret has this title (ignoring case and
-/// surrounding spaces); 400 with `"field"` for a field breaking the rules; 401 on a
-/// save conflict, which locks the session.
+/// surrounding spaces); 400 with `"field"` for a field breaking the rules; 413 if the
+/// vault is full (the session stays open); 401 on a save conflict, which locks the
+/// session.
 ///
 /// ```text
 /// POST /api/secrets {"title": "GitHub", "username": "alice", "tags": ["work"]}   (cookie, X-CSRF-Token)
@@ -277,8 +278,9 @@ pub(crate) async fn add(
 /// `{"unchanged": true}` keep their stored value; `created_at` is kept too.
 ///
 /// Errors: 404 for an unknown title; 400 with `"field"` for a changed title, an
-/// `unchanged` marker with nothing stored to keep, or a field breaking the rules; 401
-/// on a save conflict, which locks the session.
+/// `unchanged` marker with nothing stored to keep, or a field breaking the rules; 413
+/// if the vault is full (the session stays open); 401 on a save conflict, which locks
+/// the session.
 ///
 /// ```text
 /// PUT /api/secrets/GitHub {"title": "GitHub", "password": {"unchanged": true}}   (cookie, X-CSRF-Token)
@@ -352,8 +354,8 @@ fn save(
 }
 
 /// Maps a failure changing the vault: a field breaking the rules is a 400 naming the
-/// request field, the rest as when reading ([`read_error`]); a conflict has locked the
-/// session, so it never gets here.
+/// request field, a full vault a 413 that leaves the session open, the rest as when
+/// reading ([`read_error`]); a conflict has locked the session, so it never gets here.
 ///
 /// ```ignore
 /// current.with_live_vault(&state.sessions, f).map_err(write_error)?
@@ -363,6 +365,7 @@ fn write_error(err: SessionError) -> ApiError {
         SessionError::InvalidSecret(invalid) => {
             ApiError::field(field_of(invalid), invalid.to_string())
         }
+        SessionError::VaultFull => ApiError::VAULT_FULL,
         err => read_error(err),
     }
 }

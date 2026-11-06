@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 use vault_core::audit::FileSink;
 use vault_core::session::{
     DEFAULT_IDLE_TIMEOUT, MIN_UNLOCK_FAILURE, Session, SessionConfig, SessionError,
+    check_master_password,
 };
-use vault_core::storage::FileStore;
+use vault_core::storage::{FileStore, Vaultname};
 
 use crate::api::ApiError;
 use crate::auth::{self, CurrentSession};
@@ -73,6 +74,11 @@ impl<'a> SessionInfo<'a> {
 /// idle timeout out of range; 409 if the vaultname is taken; 503 when the KDF limiter
 /// is saturated or the server is stopping.
 ///
+/// Security: the cheap checks (idle timeout, vaultname, master password rules) run
+/// before a KDF slot is asked for, so invalid input never takes one from a real unlock
+/// and gets its field error even while the server is busy. Their outcome reveals
+/// nothing about any vault.
+///
 /// ```text
 /// POST /api/vaults {"vaultname": "alice", "master_password": "...", "idle_timeout_minutes": 10}
 /// 201 {"csrf_token": "...", "vaultname": "alice", "idle_timeout_minutes": 10}
@@ -83,27 +89,41 @@ pub(crate) async fn create(
     StrictJson(request): StrictJson<UnlockRequest>,
 ) -> Result<Response, ApiError> {
     let idle_timeout = idle_timeout(request.idle_timeout_minutes)?;
-    let store = store(&state)?;
-    let config = session_config(&state, idle_timeout);
-    let format = state.config.create_format;
     let UnlockRequest {
         vaultname,
         master_password,
         ..
     } = request;
+    Vaultname::parse(&vaultname).map_err(|_| create_error(SessionError::InvalidVaultname))?;
+    check_master_password(&master_password.0)
+        .map_err(|weak| create_error(SessionError::WeakMasterPassword(weak)))?;
+    let store = store(&state)?;
+    let config = session_config(&state, idle_timeout);
+    let format = state.config.create_format;
     let created = state
         .kdf
         .run(move || format.create_session(store, &vaultname, &master_password.0, config))
         .await
         .map_err(kdf_error)?;
-    let vault = created.map_err(|err| match err {
+    let vault = created.map_err(create_error)?;
+    open_session(&state, &headers, vault, idle_timeout, StatusCode::CREATED)
+}
+
+/// Maps a create failure: a field error for an invalid vaultname or a weak master
+/// password (its message states the rule, never the value), 409 for a taken
+/// vaultname, else a generic 500.
+///
+/// ```ignore
+/// let vault = created.map_err(create_error)?;
+/// ```
+fn create_error(err: SessionError) -> ApiError {
+    match err {
         SessionError::InvalidVaultname | SessionError::WeakMasterPassword(_) => {
             ApiError::field(error_field(err), err.to_string())
         }
         SessionError::VaultExists => ApiError::VAULTNAME_TAKEN,
         _ => ApiError::INTERNAL,
-    })?;
-    open_session(&state, &headers, vault, idle_timeout, StatusCode::CREATED)
+    }
 }
 
 /// `POST /api/unlock`: unlocks a vault (200).

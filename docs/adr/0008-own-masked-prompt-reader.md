@@ -6,7 +6,7 @@ The star echo shows the length of what is typed to anyone watching the screen or
 
 ## Consequences
 
-- The reader handles only what a password prompt needs: printable characters, backspace, Ctrl-U (clear), Ctrl-C (cancel), Enter. A paste that contains a newline is refused rather than split.
+- The reader handles only what a password prompt needs: printable characters, backspace, Ctrl-U (clear), Ctrl-C (cancel), Enter. A paste that contains a newline is refused rather than split, and so is a paste that would take the input past 1024 characters, so a long value is never saved cut short; in both cases nothing of the paste is entered. Typed characters past the limit ring the bell.
 - It needs a terminal: if stdin is not a TTY, hidden prompts refuse, so a master password can't be piped in.
 - The terminal must be restored from raw mode on every exit path, including cancel and errors; this is our code to get right and to test.
 - Tests drive hidden prompts through the CLI's `Terminal` trait, not through a real terminal.

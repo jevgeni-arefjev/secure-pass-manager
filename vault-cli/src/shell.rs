@@ -196,10 +196,11 @@ fn open_vault(
         Err(err) => return fail(terminal, &err),
     };
     let audit: Arc<dyn AuditSink> = Arc::new(FileSink::new(dir.clone()));
+    // Surrounding spaces are trimmed by `Vaultname::parse`, as on the web.
     let vaultname = match &open.vaultname {
-        Some(name) => name.trim().to_owned(),
+        Some(name) => name.clone(),
         None => match terminal.read_line("Vaultname: ") {
-            Ok(name) => name.trim().to_owned(),
+            Ok(name) => String::from(name.as_str()),
             Err(err) => return fail(terminal, &err),
         },
     };

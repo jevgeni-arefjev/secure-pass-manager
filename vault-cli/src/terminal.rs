@@ -38,6 +38,9 @@ pub enum TerminalError {
     NotATerminal,
     /// A paste into a hidden prompt held a line break; nothing was taken from it.
     MultilinePaste,
+    /// A paste into a hidden prompt would have taken it past its character limit;
+    /// nothing was taken from it.
+    PasteTooLong,
     /// Reading or writing the terminal failed.
     Io,
     /// There is no clipboard to copy to (e.g. no display).
@@ -57,6 +60,13 @@ impl fmt::Display for TerminalError {
             Self::EndOfInput => "end of input",
             Self::NotATerminal => "hidden input needs a terminal",
             Self::MultilinePaste => "pasted text held a line break; nothing was entered",
+            Self::PasteTooLong => {
+                return write!(
+                    f,
+                    "pasted text was longer than {} characters; nothing was entered",
+                    masked::MAX_HIDDEN_CHARS
+                );
+            }
             Self::Io => "terminal input or output failed",
             Self::NoClipboard => "the clipboard is not available",
         })

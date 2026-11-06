@@ -14,3 +14,8 @@ unsafe_code = "forbid"
 # Argon2 is unusably slow unoptimised; keep it fast in debug builds and tests.
 [profile.dev.package.argon2]
 opt-level = 3
+
+# The full-vault tests seal and parse a 64 MiB body; serde_json and zeroize are
+# monomorphised into vault-core, so unoptimised they take over a minute.
+[profile.dev.package.vault-core]
+opt-level = 2

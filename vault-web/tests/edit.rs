@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::http::{Method, Response, StatusCode, header};
 use common::*;
 use serde_json::{Value, json};
-use vault_core::session::Clock;
+use vault_core::session::{Clock, FILLER_TITLE};
 
 /// The JSON body of a response, asserting its status and the security headers.
 ///
@@ -532,6 +532,36 @@ async fn malformed_bodies_are_refused() {
         app.send(not_json).await.status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
+}
+
+#[tokio::test]
+async fn a_full_vault_is_a_form_error_and_the_session_stays_open() {
+    let (app, alice) = with_github().await;
+    app.fill_vault("alice");
+    let alice = {
+        drop(alice);
+        app.unlock("alice").await
+    };
+    let response = app
+        .send(alice.post_json("/api/secrets", &json!({"title": "GitLab"})))
+        .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(set_cookie(&response).is_none());
+    assert_eq!(body_json(response).await, json!({"error": "vault is full"}));
+
+    // The session goes on: the refused secret isn't there, and removing makes room.
+    assert_eq!(
+        app.send(alice.get("/api/secrets/GitLab")).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = app
+        .send(alice.delete(&format!("/api/secrets/{FILLER_TITLE}")))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = app
+        .send(alice.post_json("/api/secrets", &json!({"title": "GitLab"})))
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]

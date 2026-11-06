@@ -61,7 +61,8 @@ use crate::storage::{StorageError, VaultStore, Vaultname};
 
 pub use clock::{Clock, SystemClock};
 pub use master_password_policy::{
-    MIN_MASTER_PASSWORD_CHARS, WeakMasterPassword, check as check_master_password,
+    MAX_MASTER_PASSWORD_CHARS, MIN_MASTER_PASSWORD_CHARS, WeakMasterPassword,
+    check as check_master_password,
 };
 pub use secret::{CustomField, FieldValue, HiddenValue, InvalidSecret, Secret};
 
@@ -141,6 +142,9 @@ pub enum SessionError {
     SecretNotFound,
     /// A secret breaks the field rules.
     InvalidSecret(InvalidSecret),
+    /// Saving would make the vault file too large to open again. Nothing was written
+    /// and the session stays unlocked; remove or shorten secrets to make room.
+    VaultFull,
     /// The vault file, its header or its body isn't something this build can read.
     VaultUnreadable,
     /// The file system or database failed.
@@ -172,6 +176,7 @@ impl fmt::Display for SessionError {
             ),
             Self::SecretNotFound => f.write_str("no secret with this title"),
             Self::InvalidSecret(invalid) => invalid.fmt(f),
+            Self::VaultFull => StorageError::VaultFull.fmt(f),
             Self::VaultUnreadable => f.write_str("vault file can't be read"),
             Self::Storage => StorageError::Io.fmt(f),
             Self::Randomness => CryptoError::Randomness.fmt(f),
@@ -196,6 +201,7 @@ impl From<StorageError> for SessionError {
             StorageError::AlreadyExists => Self::VaultExists,
             StorageError::Conflict => Self::Conflict,
             StorageError::NotAVault => Self::VaultUnreadable,
+            StorageError::VaultFull => Self::VaultFull,
             StorageError::NotFound | StorageError::Io => Self::Storage,
         }
     }
@@ -653,8 +659,9 @@ impl<S: VaultStore> Session<S> {
     /// case), and writes the vault at once.
     ///
     /// Security: the secret is validated first ([`InvalidSecret`]); on a storage
-    /// conflict the session locks ([`SessionError::Conflict`]); on any other failure
-    /// nothing changes.
+    /// conflict the session locks ([`SessionError::Conflict`]); on any other failure,
+    /// including a vault that would grow too large to open ([`SessionError::VaultFull`]),
+    /// nothing changes and the session stays unlocked.
     ///
     /// ```
     /// # use std::sync::Arc;
@@ -1049,6 +1056,55 @@ fn open_vault(
         secrets,
     };
     Ok((vault, plaintext))
+}
+
+/// Title of the secret [`fill_vault_for_tests`] adds; remove it to make room again.
+#[cfg(feature = "insecure-test-kdf")]
+pub const FILLER_TITLE: &str = "filler";
+
+/// Fills `vaultname`'s vault (unlocked with `password`) to the vault size limit: adds a
+/// secret titled [`FILLER_TITLE`] whose notes make the vault file as large as it may be, with
+/// its last padding block used up, so that no further secret fits. Its notes break the
+/// field rules on purpose (as a vault from another build could), so it is written
+/// straight into the body, past [`Session::save`].
+///
+/// Security: never for real vaults. Exists only with the `insecure-test-kdf` feature,
+/// which release builds refuse.
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use vault_core::audit::MemorySink;
+/// # use vault_core::crypto::MasterPassword;
+/// # use vault_core::session::{self, Secret, Session, SessionConfig, SessionError};
+/// # use vault_core::storage::FileStore;
+/// # let dir = tempfile::tempdir()?;
+/// # let config = || SessionConfig::new(Arc::new(MemorySink::default()));
+/// let password = MasterPassword::new("correct horse battery".into());
+/// Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, config())?.lock();
+/// session::fill_vault_for_tests(&FileStore::new(dir.path())?, "alice", &password)?;
+/// let mut session = Session::unlock(FileStore::new(dir.path())?, "alice", &password, config())?;
+/// assert_eq!(session.save(Secret::new("one more")), Err(SessionError::VaultFull));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[cfg(feature = "insecure-test-kdf")]
+pub fn fill_vault_for_tests<S: VaultStore>(
+    store: &S,
+    vaultname: &str,
+    password: &MasterPassword,
+) -> Result<(), SessionError> {
+    let vaultname = Vaultname::parse(vaultname)?;
+    let sealed = store.load(&vaultname)?;
+    let key = crypto::unlock(&sealed.header, password)?;
+    let plaintext = crypto::open_body(&key, &sealed)?;
+    let mut secrets = body::decode(&plaintext).map_err(|_| SessionError::VaultUnreadable)?;
+    secrets.push(Secret::new(FILLER_TITLE).with_notes("x"));
+    let with_one_x = body::encode(&secrets).as_bytes().len();
+    let max = usize::try_from(crate::storage::MAX_VAULT_FILE_LEN).expect("fits in memory");
+    let notes = "x".repeat(1 + crypto::largest_plaintext_len(max) - with_one_x);
+    *secrets.last_mut().expect("just pushed") = Secret::new(FILLER_TITLE).with_notes(notes);
+    let full = crypto::seal(&key, &sealed.header, &body::encode(&secrets))?;
+    store.save(&vaultname, &full)?;
+    Ok(())
 }
 
 /// Appends `event`, stamped with the config's clock, to `vaultname`'s audit log;

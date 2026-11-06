@@ -13,12 +13,12 @@ use proptest::prelude::*;
 use proptest::test_runner::TestRunner;
 use tempfile::TempDir;
 use vault_core::audit::{AuditError, AuditSink, Event, Line, MemorySink, Record};
-use vault_core::crypto::{Header, MasterPassword};
+use vault_core::crypto::{self, Header, MasterPassword, Plaintext};
 use vault_core::session::{
-    Clock, CustomField, DEFAULT_IDLE_TIMEOUT, FieldValue, HiddenValue, InvalidSecret, Saved,
+    self, Clock, CustomField, DEFAULT_IDLE_TIMEOUT, FieldValue, HiddenValue, InvalidSecret, Saved,
     Secret, Session, SessionConfig, SessionError, WeakMasterPassword,
 };
-use vault_core::storage::{FileStore, Vaultname};
+use vault_core::storage::{FileStore, MAX_VAULT_FILE_LEN, VaultStore, Vaultname};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -392,6 +392,16 @@ fn vaultnames_are_validated_and_case_insensitive() {
 }
 
 #[test]
+fn a_vaultname_with_surrounding_spaces_opens_the_same_vault() {
+    let fx = Fixture::new();
+    fx.try_create(" alice ", PASSWORD).unwrap().lock();
+    let session = fx.unlock("alice", PASSWORD).unwrap();
+    assert_eq!(session.vaultname().as_str(), "alice");
+    session.lock();
+    assert!(fx.unlock("  alice", PASSWORD).is_ok());
+}
+
+#[test]
 fn create_refuses_an_existing_vaultname() {
     let fx = Fixture::new();
     fx.create().lock();
@@ -416,6 +426,89 @@ fn weak_master_passwords_are_refused() {
     assert_eq!(weak("Password1234"), too_common);
     assert_eq!(weak("aaaaaaaaaaaaaaaa"), too_common);
     assert!(fx.try_create("alice", "twelve chars").is_ok());
+}
+
+#[test]
+fn a_new_master_password_must_be_at_most_1024_characters_after_nfc() {
+    let fx = Fixture::new();
+    let too_long = Some(SessionError::WeakMasterPassword(
+        WeakMasterPassword::TooLong,
+    ));
+    assert!(fx.try_create("alice", &"ab".repeat(512)).is_ok());
+    assert_eq!(
+        fx.try_create("bob", &format!("{}c", "ab".repeat(512)))
+            .err(),
+        too_long
+    );
+    // 1024 decomposed "é" (e + combining acute, 2048 chars) NFC to 1024 characters.
+    let decomposed = "e\u{301}".repeat(1023) + "x";
+    assert!(fx.try_create("carol", &decomposed).is_ok());
+    assert_eq!(
+        SessionError::WeakMasterPassword(WeakMasterPassword::TooLong).to_string(),
+        "master password must be at most 1024 characters"
+    );
+}
+
+#[test]
+fn a_new_master_password_must_not_hold_control_characters() {
+    let fx = Fixture::new();
+    let control = Some(SessionError::WeakMasterPassword(
+        WeakMasterPassword::ControlCharacter,
+    ));
+    for password in [
+        "correct\nhorse battery",
+        "correct\thorse battery",
+        "correct horse\u{1b}[0m",
+        "correct horse\u{85}battery",
+    ] {
+        assert_eq!(fx.try_create("alice", password).err(), control);
+    }
+    assert_eq!(
+        SessionError::WeakMasterPassword(WeakMasterPassword::ControlCharacter).to_string(),
+        "master password must not contain control characters"
+    );
+}
+
+#[test]
+fn an_existing_master_password_breaking_the_new_rules_still_unlocks_and_can_be_changed() {
+    let fx = Fixture::new();
+    for (vaultname, old) in [("alice", "line one\nline two"), ("bob", &*"x1".repeat(600))] {
+        // Written directly, as an older build without these rules could have.
+        let old = MasterPassword::new(old.to_owned());
+        let (_, sealed) = crypto::create_insecure_for_tests(
+            &old,
+            &Plaintext::new(br#"{"version":1,"secrets":[]}"#.to_vec()),
+        )
+        .unwrap();
+        fx.store()
+            .create(&Vaultname::parse(vaultname).unwrap(), &sealed)
+            .unwrap();
+
+        let mut session = Session::unlock(fx.store(), vaultname, &old, fx.config()).unwrap();
+        session
+            .change_master_password(&old, &MasterPassword::new("tr0ub4dor & 3 staples".into()))
+            .unwrap();
+        session.lock();
+        assert!(fx.unlock(vaultname, "tr0ub4dor & 3 staples").is_ok());
+    }
+}
+
+#[test]
+fn a_failed_unlock_with_unusual_input_looks_like_any_other() {
+    let fx = Fixture::new();
+    fx.create().lock();
+    for input in [
+        "x".repeat(5000),
+        "correct horse\nbattery".to_owned(),
+        "\u{1b}[2J".to_owned(),
+    ] {
+        let slept_before = fx.clock.slept();
+        assert_eq!(
+            fx.unlock("alice", &input).err(),
+            Some(SessionError::UnlockFailed)
+        );
+        assert!(fx.clock.slept() - slept_before >= Duration::from_secs(1));
+    }
 }
 
 #[test]
@@ -714,6 +807,37 @@ fn changing_the_master_password_needs_the_current_one_and_a_strong_new_one() {
     );
     session.lock();
     assert!(fx.unlock("alice", PASSWORD).is_ok());
+}
+
+#[test]
+fn a_save_past_the_vault_size_limit_is_refused_and_changes_nothing() {
+    let fx = Fixture::new();
+    fx.create().lock();
+    session::fill_vault_for_tests(&fx.store(), "alice", &MasterPassword::new(PASSWORD.into()))
+        .unwrap();
+    let before = fx.vault_file_bytes();
+    assert!(before.len() as u64 <= MAX_VAULT_FILE_LEN);
+    assert!(before.len() as u64 > MAX_VAULT_FILE_LEN - 4096);
+    let mut session = fx.unlock("alice", PASSWORD).unwrap();
+
+    assert_eq!(
+        session.save(Secret::new("one more")),
+        Err(SessionError::VaultFull)
+    );
+    assert_eq!(SessionError::VaultFull.to_string(), "vault is full");
+    assert!(session.is_unlocked());
+    assert_eq!(
+        session.get("one more").err(),
+        Some(SessionError::SecretNotFound)
+    );
+    assert_eq!(fx.vault_file_bytes(), before);
+
+    // Removing a secret still works, so a full vault can always be made smaller.
+    session.remove(session::FILLER_TITLE).unwrap();
+    session.save(Secret::new("one more")).unwrap();
+    session.lock();
+    let mut session = fx.unlock("alice", PASSWORD).unwrap();
+    assert_eq!(session.list().unwrap().len(), 1);
 }
 
 #[test]

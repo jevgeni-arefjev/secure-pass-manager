@@ -21,7 +21,7 @@ It is a password manager with one shared Rust core and two front ends:
 ├── docs/adr/               # architecture decision records
 ├── vault-core/             # shared library, no I/O front end
 │   ├── tests/crypto.rs     # encryption module behaviour, through its public API
-│   ├── tests/storage.rs    # storage module behaviour, through its public API
+│   ├── tests/storage.rs    # storage module behaviour, through its public API: one size limit for load and save
 │   ├── tests/session.rs    # session module behaviour, through its public API
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
 │   ├── tests/backup.rs     # backup destinations and Session::backup, through the public API
@@ -57,11 +57,11 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── assets/             # client bundle from `npm run build` in web/ (not committed)
 │   ├── tests/common/       # shared test helpers: test app on a temp vault directory with a manual (optionally panicking) clock, request builders, log capture
 │   ├── tests/app.rs        # the HTTP app in-process (tower `oneshot`): security headers, Host check, request logs, "client not built" page
-│   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, KDF limiter (503), strict parsing, log contents
+│   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, master password rules, KDF limiter (503; cheap create checks first), strict parsing, log contents
 │   ├── tests/secrets.rs    # list and detail: no hidden values, titles in URLs (percent-encoded, unusual characters), 404, one vault per session
 │   ├── tests/reveal.rs     # reveal: one hidden value per request, CSRF, 404 for unknown title/field, plain fields refused, audit event, nothing in logs
 │   ├── tests/expiry.rs     # sweeper (idle timeout, 8 h lifetime), activity keeping a session open, lock all on shutdown, panicking request (500, session locked)
-│   ├── tests/edit.rs       # add, edit, delete: generated password, 409 taken title, unchanged hidden values kept, no rename, field errors and edge cases, strict parsing, CSRF, audit events, save conflict locks (401)
+│   ├── tests/edit.rs       # add, edit, delete: generated password, 409 taken title, unchanged hidden values kept, no rename, field errors and edge cases, strict parsing, CSRF, audit events, full vault (413, session stays open), save conflict locks (401)
 │   ├── tests/tls.rs        # certificate loading, self-signed generation, 0600 cache and reuse
 │   ├── tests/args.rs       # server flags, through the public `args` API
 │   └── src/
@@ -177,7 +177,9 @@ vault locked
 All commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands). Notes:
 
 - Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux, `~/Library/Application Support/secure-pass-manager/vaults` on macOS), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
-- The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused.
+- The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused. A hidden prompt takes up to 1024 characters; a paste that would go past that (or that holds a line break) is refused whole, and nothing is entered.
+- A new master password (`init`, `passwd`, or creating a vault on the web) must be 12-1024 characters with no control characters. Unlock accepts any master password, so an older vault whose master password breaks these rules still opens and can be given a new one with `passwd`.
+- A vault file is at most 64 MiB. A save that would go past that is refused with "vault is full" and nothing is written; remove or shorten secrets to make room.
 - The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
 - `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes, backups. It holds titles in plaintext but never a field value.
 - `backup <path>` writes an encrypted copy of the vault file to a new file outside the vault directory, e.g. `backup /media/usb/alice.vault`; it never overwrites. To restore, create a vault home and put the backup in it: `mkdir -m 700 ~/.local/share/secure-pass-manager/vaults/alice && cp /media/usb/alice.vault ~/.local/share/secure-pass-manager/vaults/alice/secrets.vault`, then `vault unlock alice`. Any vaultname works. On macOS, use the macOS vault directory above, in quotes because of the space.

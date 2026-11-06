@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use vault_core::audit::FileSink;
 use vault_core::crypto::MasterPassword;
-use vault_core::session::{Clock, Secret, Session, SessionConfig};
+use vault_core::session::{self, Clock, Secret, Session, SessionConfig};
 use vault_core::storage::FileStore;
 use vault_web::{AppConfig, Assets, CreateFormat};
 
@@ -267,6 +267,18 @@ impl TestApp {
         }
         session.lock();
         self.unlock(vaultname).await
+    }
+
+    /// Fills vault `vaultname` (master password [`PASSWORD`]) to the vault size limit,
+    /// straight through `vault-core`, so that no further secret fits.
+    ///
+    /// ```text
+    /// app.fill_vault("alice");
+    /// ```
+    pub fn fill_vault(&self, vaultname: &str) {
+        let store = FileStore::new(self.dir.path().join("web-vaults")).unwrap();
+        let password = MasterPassword::new(PASSWORD.into());
+        session::fill_vault_for_tests(&store, vaultname, &password).unwrap();
     }
 
     /// Unlocks vault `vaultname` with [`PASSWORD`] and returns its session.

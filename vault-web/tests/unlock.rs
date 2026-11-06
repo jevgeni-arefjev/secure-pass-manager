@@ -157,6 +157,14 @@ async fn weak_master_password_is_a_field_error() {
         ("short", "master password must be at least 12 characters"),
         ("password1234", "master password is too common"),
         ("aaaaaaaaaaaaaaaa", "master password is too common"),
+        (
+            &*"x1".repeat(513),
+            "master password must be at most 1024 characters",
+        ),
+        (
+            "correct horse\nbattery",
+            "master password must not contain control characters",
+        ),
     ] {
         let response = app
             .send(post_json("/api/vaults", &unlock_body("alice", password)))
@@ -168,6 +176,31 @@ async fn weak_master_password_is_a_field_error() {
         );
     }
     assert!(!app.vault_home("alice").exists());
+}
+
+#[tokio::test]
+async fn a_1024_character_master_password_is_accepted() {
+    let app = TestApp::new();
+    let password = "x1".repeat(512);
+    let response = app
+        .send(post_json("/api/vaults", &unlock_body("alice", &password)))
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn a_vaultname_with_surrounding_spaces_opens_the_same_vault() {
+    let app = TestApp::new();
+    let response = app
+        .send(post_json("/api/vaults", &unlock_body(" alice ", PASSWORD)))
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(body_json(response).await["vaultname"], "alice");
+    let response = app
+        .send(post_json("/api/unlock", &unlock_body("  alice", PASSWORD)))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["vaultname"], "alice");
 }
 
 #[tokio::test]
@@ -193,6 +226,8 @@ async fn every_unlock_failure_is_the_same_401_after_the_minimum_delay() {
         ("bob", PASSWORD),
         ("../alice", PASSWORD),
         ("", ""),
+        ("alice", &*"x".repeat(5000)),
+        ("alice", "correct horse\nbattery\u{1b}[2J"),
     ] {
         let before = app.clock.elapsed();
         let response = app
@@ -546,6 +581,25 @@ async fn unlocks_beyond_the_kdf_limit_are_turned_away_with_503() {
             body_json(response).await,
             json!({"error": "server busy, try again shortly"})
         );
+    }
+
+    // Invalid creates are refused by their cheap checks, without waiting for a slot.
+    for (body, field) in [
+        (unlock_body("../alice", PASSWORD), "vaultname"),
+        (unlock_body("alice", "short"), "master_password"),
+        (unlock_body("alice", &"x1".repeat(513)), "master_password"),
+        (
+            unlock_body("alice", "correct horse\tbattery"),
+            "master_password",
+        ),
+        (
+            json!({"vaultname": "alice", "master_password": PASSWORD, "idle_timeout_minutes": 0}),
+            "idle_timeout_minutes",
+        ),
+    ] {
+        let response = app.send(post_json("/api/vaults", &body)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+        assert_eq!(body_json(response).await["field"], field);
     }
 
     release.send(()).unwrap();

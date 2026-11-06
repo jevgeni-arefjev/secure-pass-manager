@@ -366,6 +366,17 @@ fn wrap_vault_key(
     Ok(header)
 }
 
+/// Longest body plaintext whose sealed vault file (header, padded body and tag) is at
+/// most `max_file_len` bytes. For filling a vault in tests.
+///
+/// ```ignore
+/// let room = crypto::largest_plaintext_len(64 * 1024 * 1024);
+/// ```
+#[cfg(feature = "insecure-test-kdf")]
+pub(crate) fn largest_plaintext_len(max_file_len: usize) -> usize {
+    (max_file_len - Header::LEN - TAG_LEN) / BODY_PADDING * BODY_PADDING - LENGTH_PREFIX_LEN
+}
+
 /// Seals `plaintext` under `header` with a fresh body nonce: pads it to a multiple of
 /// [`BODY_PADDING`] in locked memory, then encrypts with the whole header as associated data.
 ///
