@@ -43,15 +43,17 @@ These are deliberate design choices that differ from `course-project-requirement
 
 ## Timeline
 
-- [ ] MVP with vault at rest, encryption module, storage module & CLI module. It should be working and usable code.
-- [ ] Build and run instructions that work on a clean machine.
-- [ ] Basic working web interface with the core flows.
-- [ ] Basic secure authentication (Argon2id-based unlock, no stored hash; see Deviations) and secure session management.
-- [ ] Application served over TLS in the development setup.
+- [x] MVP with vault at rest, encryption module, storage module & CLI module. It should be working and usable code.
+- [x] Build and run instructions that work on a clean machine.
+- [x] Basic working web interface with the core flows.
+- [x] Basic secure authentication (Argon2id-based unlock, no stored hash; see Deviations) and secure session management.
+- [x] Application served over TLS in the development setup.
 - [ ] Full input validation and sanitization on all fields.
 - [ ] Structured logging of key events and secure error handling.
-- [ ] Per-user access control: a session can only open the vault it unlocked (Session module; see Deviations).
+- [x] Per-user access control: a session can only open the vault it unlocked (Session module; see Deviations).
 - [ ] Test cases written and passing, including input-validation edge cases and memory handling checks.
+- [ ] User manual for the CLI and the web app.
+- [ ] Reports: encryption methods, memory management, authentication and security features, how SQL injection, XSS and CSRF are prevented, and test results.
 
 ## Agent skills
 
