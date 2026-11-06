@@ -22,7 +22,7 @@ runs:
       run: cargo test --locked
     - name: Slow tests (production KDF)
       shell: bash
-      run: cargo test --locked -- --ignored
+      run: cargo test --locked --lib --bins --tests -- --ignored
     - uses: actions/setup-node@v5
       with:
         node-version: 22

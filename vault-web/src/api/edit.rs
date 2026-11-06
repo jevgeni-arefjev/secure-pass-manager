@@ -394,7 +394,7 @@ fn write_error(err: SessionError) -> ApiError {
 /// index and part, and its fixed message (never the value).
 ///
 /// ```ignore
-/// SessionError::InvalidSecret(invalid) => invalid_secret(&invalid),
+/// let err = invalid_secret(&invalid);
 /// ```
 fn invalid_secret(invalid: &InvalidSecret) -> ApiError {
     let fields = invalid

@@ -239,7 +239,7 @@ Both front ends save through the same core rules (ADR-0013); a refused save list
 
 ```bash
 cargo test                          # all workspace tests
-cargo test -- --ignored             # slow tests: the production KDF (256 MiB Argon2id)
+cargo test --lib --bins --tests -- --ignored  # slow tests: the production KDF (256 MiB Argon2id)
 cargo clippy --all-targets -- -D warnings   # also requires a docstring on every item in src/
 cargo fmt --all --check
 ```
