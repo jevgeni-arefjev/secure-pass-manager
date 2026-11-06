@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s), and add, edit and delete secrets (an empty password is generated on the server; an edit keeps untouched hidden fields without the browser ever holding them). Sessions end server-side: a sweeper locks idle sessions and every session 8 h after unlock, SIGINT/SIGTERM lock every session before exit, a panicking request gets a generic 500 and its session is locked, and an open tab returns to the unlock page once its session has ended.
+> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s), and add, edit and delete secrets (an empty password is generated on the server; an edit keeps untouched hidden fields without the browser ever holding them; a refused save shows every invalid field at once). Sessions end server-side: a sweeper locks idle sessions and every session 8 h after unlock, SIGINT/SIGTERM lock every session before exit, a panicking request gets a generic 500 and its session is locked, and an open tab returns to the unlock page once its session has ended.
 
 ## Project layout
 
@@ -37,7 +37,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── audit.rs        # Audit log: typed events as JSON Lines in `audit.log` per vault home, at most a title, rotated at 1 MiB, fail-open (ADR-0010)
 │       ├── backup.rs       # Backup: ciphertext-only copy of a vault file to a new file outside the vault directory, verified, never overwriting
 │       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once, records audit events (single user in MVP)
-│       └── session/        # secret model + field validation, JSON body, master password policy, clock
+│       └── session/        # secret model + field validation (every problem reported at once), JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   ├── tests/args.rs       # command grammar and help text, through its public API
 │   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping), through its public API
@@ -51,7 +51,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── clipboard.rs    # `--copy`: excluded from clipboard history, cleared after 20 s, on lock and exit
 │       ├── terminal.rs     # Terminal trait (fakeable in tests) and the real stdin/stdout one; in-memory history only
 │       ├── terminal/       # masked prompt: one `*` per character, zeroizing buffer (ADR-0008)
-│       └── render.rs       # get view, list table and log view; escapes control and bidi characters; hidden fields shown as `*`
+│       └── render.rs       # get view, list table, log view and every problem of a refused save; escapes control and bidi characters; hidden fields shown as `*`
 ├── vault-web/              # `vault-web` binary: HTTPS server for the browser client
 │   ├── build.rs            # embeds assets/ into the binary at compile time; never runs npm
 │   ├── assets/             # client bundle from `npm run build` in web/ (not committed)
@@ -61,7 +61,7 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── tests/secrets.rs    # list and detail: no hidden values, titles in URLs (percent-encoded, unusual characters), 404, one vault per session
 │   ├── tests/reveal.rs     # reveal: one hidden value per request, CSRF, 404 for unknown title/field, plain fields refused, audit event, nothing in logs
 │   ├── tests/expiry.rs     # sweeper (idle timeout, 8 h lifetime), activity keeping a session open, lock all on shutdown, panicking request (500, session locked)
-│   ├── tests/edit.rs       # add, edit, delete: generated password, 409 taken title, unchanged hidden values kept, no rename, field errors and edge cases, strict parsing, CSRF, audit events, full vault (413, session stays open), save conflict locks (401)
+│   ├── tests/edit.rs       # add, edit, delete: generated password, 409 taken title, unchanged hidden values kept, no rename, every field problem of a refused secret listed (`fields`) and edge cases, strict parsing, CSRF, audit events, full vault (413, session stays open), save conflict locks (401)
 │   ├── tests/tls.rs        # certificate loading, self-signed generation, 0600 cache and reuse
 │   ├── tests/args.rs       # server flags, through the public `args` API
 │   └── src/
@@ -71,7 +71,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── args.rs         # flags: --bind, --vault-dir, --tls-cert/--tls-key
 │       ├── tls.rs          # rustls (ring) config from given PEM files or a cached self-signed localhost certificate (rcgen)
 │       ├── middleware.rs   # request log (method, route template, status, latency, session hash), panic catcher (generic 500, session locked), Host and Origin checks, security headers and CSP
-│       ├── api.rs          # `/api` routes and JSON errors (`{"error"}`, optional `"field"`)
+│       ├── api.rs          # `/api` routes and JSON errors (`{"error"}`, optional `"field"`; a refused secret lists every problem in `"fields"`)
 │       ├── api/vault.rs    # POST /api/vaults (create), /api/unlock, /api/lock; GET /api/session
 │       ├── api/secrets.rs  # GET /api/secrets (list), /api/secrets/{title} (detail): hidden fields named, never sent; POST /api/secrets/{title}/reveal: one hidden field, audited
 │       ├── api/edit.rs     # POST /api/secrets (add), PUT /api/secrets/{title} (replace; hidden values sent as {"unchanged": true} kept), DELETE /api/secrets/{title}; hidden values straight into HiddenValue
@@ -85,7 +85,7 @@ It is a password manager with one shared Rust core and two front ends:
     ├── tsconfig.json       # strict type-checking of src/; tsconfig.test.json adds test/ and emits to .test-build/
     ├── scripts/build.mjs   # `npm run build`: esbuild bundle + static files into vault-web/assets
     ├── static/             # index.html and app.css (no inline scripts or styles)
-    ├── src/                # main.ts (create/unlock/list/detail/add/edit pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked), forms.ts, secret-form.ts (form values → add/edit request, unchanged hidden fields), secrets.ts (search, title paths), reveal.ts (30 s reveal, 20 s clipboard clear), session-watch.ts (session check every 30 s and when the tab returns), text.ts (control/bidi escapes), url.ts (http/https link allowlist)
+    ├── src/                # main.ts (create/unlock/list/detail/add/edit pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked), forms.ts, secret-form.ts (form values → add/edit request, unchanged hidden fields, where each field problem is shown), secrets.ts (search, title paths), reveal.ts (30 s reveal, 20 s clipboard clear), session-watch.ts (session check every 30 s and when the tab returns), text.ts (control/bidi escapes), url.ts (http/https link allowlist)
     └── test/               # node:test tests of the pure helpers
 ```
 

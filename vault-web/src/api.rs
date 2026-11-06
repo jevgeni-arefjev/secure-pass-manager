@@ -1,7 +1,9 @@
 //! The JSON API under `/api` and its error responses.
 //!
 //! Errors are `{"error": "<message>"}`, with a `"field"` naming the input at fault for
-//! validation errors. Messages never carry internals.
+//! validation errors. A refused secret instead lists every problem:
+//! `{"error", "fields": [{"field", "index"?, "part"?, "message"}]}`. Messages never
+//! carry internals or request values.
 
 mod edit;
 mod secrets;
@@ -32,8 +34,24 @@ pub(crate) struct ApiError {
     status: StatusCode,
     message: Cow<'static, str>,
     field: Option<&'static str>,
+    /// Every problem of a refused secret; empty for any other error.
+    fields: Vec<FieldError>,
     /// Whether the response also ends the session in the browser.
     ends_session: bool,
+}
+
+/// One problem of a refused secret: the request field (`index` for a tag or custom
+/// field, `part` `"name"` or `"value"` for a custom field) and a fixed message.
+///
+/// Security: the message is a `vault-core` rule; it never contains the value.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FieldError {
+    pub(crate) field: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) part: Option<&'static str>,
+    pub(crate) message: String,
 }
 
 impl ApiError {
@@ -47,6 +65,7 @@ impl ApiError {
             status,
             message: Cow::Borrowed(message),
             field: None,
+            fields: Vec::new(),
             ends_session: false,
         }
     }
@@ -79,6 +98,7 @@ impl ApiError {
         status: StatusCode::UNAUTHORIZED,
         message: Cow::Borrowed("vault is locked"),
         field: None,
+        fields: Vec::new(),
         ends_session: true,
     };
 
@@ -96,6 +116,7 @@ impl ApiError {
         status: StatusCode::BAD_REQUEST,
         message: Cow::Borrowed("not a hidden field"),
         field: Some("field"),
+        fields: Vec::new(),
         ends_session: false,
     };
 
@@ -104,6 +125,7 @@ impl ApiError {
         status: StatusCode::CONFLICT,
         message: Cow::Borrowed("a secret with this title already exists"),
         field: Some("title"),
+        fields: Vec::new(),
         ends_session: false,
     };
 
@@ -112,6 +134,7 @@ impl ApiError {
         status: StatusCode::BAD_REQUEST,
         message: Cow::Borrowed("the title can't be changed"),
         field: Some("title"),
+        fields: Vec::new(),
         ends_session: false,
     };
 
@@ -161,6 +184,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             message: Cow::Borrowed("no stored hidden value to keep unchanged"),
             field: Some(field),
+            fields: Vec::new(),
             ends_session: false,
         }
     }
@@ -175,6 +199,23 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
             field: Some(field),
+            fields: Vec::new(),
+            ends_session: false,
+        }
+    }
+
+    /// A 400 for a refused secret, listing every problem in `"fields"`; `"error"`
+    /// carries only a generic message.
+    ///
+    /// ```ignore
+    /// ApiError::invalid_secret(vec![FieldError { field: "title", index: None, part: None, message }])
+    /// ```
+    pub(crate) fn invalid_secret(fields: Vec<FieldError>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: Cow::Borrowed("secret not saved: some fields are invalid"),
+            field: None,
+            fields,
             ends_session: false,
         }
     }
@@ -186,10 +227,13 @@ struct ErrorBody<'a> {
     error: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     field: Option<&'static str>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    fields: &'a [FieldError],
 }
 
 impl IntoResponse for ApiError {
-    /// `status` with `{"error": message}`, plus `"field"` for a validation error; for
+    /// `status` with `{"error": message}`, plus `"field"` for a validation error or
+    /// `"fields"` for a refused secret; for
     /// [`ApiError::LOCKED`], also the headers ending the session in the browser.
     ///
     /// ```ignore
@@ -199,6 +243,7 @@ impl IntoResponse for ApiError {
         let body = ErrorBody {
             error: &self.message,
             field: self.field,
+            fields: &self.fields,
         };
         let mut response = (self.status, Json(body)).into_response();
         if self.ends_session {

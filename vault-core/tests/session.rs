@@ -15,8 +15,9 @@ use tempfile::TempDir;
 use vault_core::audit::{AuditError, AuditSink, Event, Line, MemorySink, Record};
 use vault_core::crypto::{self, Header, MasterPassword, Plaintext};
 use vault_core::session::{
-    self, Clock, CustomField, DEFAULT_IDLE_TIMEOUT, FieldValue, HiddenValue, InvalidSecret, Saved,
-    Secret, Session, SessionConfig, SessionError, WeakMasterPassword,
+    self, Clock, CustomField, CustomFieldPart, DEFAULT_IDLE_TIMEOUT, FieldProblem, FieldValue,
+    HiddenValue, Saved, Secret, SecretField, Session, SessionConfig, SessionError,
+    WeakMasterPassword,
 };
 use vault_core::storage::{FileStore, MAX_VAULT_FILE_LEN, VaultStore, Vaultname};
 
@@ -254,6 +255,18 @@ fn field_text(field: &CustomField) -> &str {
 /// ```
 fn save_result(secret: Secret) -> Result<Saved, SessionError> {
     Fixture::new().create().save(secret)
+}
+
+/// The problems of a refused save, `None` if it wasn't refused for its fields.
+///
+/// ```text
+/// assert_eq!(problems(save_result(Secret::new(""))), Some(vec![FieldProblem::Title]));
+/// ```
+fn problems(result: Result<Saved, SessionError>) -> Option<Vec<FieldProblem>> {
+    match result {
+        Err(SessionError::InvalidSecret(invalid)) => Some(invalid.problems().to_vec()),
+        _ => None,
+    }
 }
 
 #[test]
@@ -584,57 +597,57 @@ fn removed_secrets_stay_removed_after_unlock() {
 
 #[test]
 fn titles_and_fields_are_validated() {
-    let invalid = |secret| save_result(secret).err();
-    let err = |e| Some(SessionError::InvalidSecret(e));
+    let invalid = |secret| problems(save_result(secret));
+    let err = |problem| Some(vec![problem]);
 
-    assert_eq!(invalid(Secret::new("   ")), err(InvalidSecret::Title));
+    assert_eq!(invalid(Secret::new("   ")), err(FieldProblem::Title));
     assert_eq!(
         invalid(Secret::new("a".repeat(65))),
-        err(InvalidSecret::Title)
+        err(FieldProblem::Title)
     );
     assert_eq!(
         invalid(Secret::new("git\u{1b}[2Jhub")),
-        err(InvalidSecret::Title)
+        err(FieldProblem::Title)
     );
     assert_eq!(
         invalid(Secret::new("git\u{202e}buh")),
-        err(InvalidSecret::Title)
+        err(FieldProblem::Title)
     );
     assert_eq!(
         invalid(Secret::new("git\u{200b}hub")),
-        err(InvalidSecret::Title)
+        err(FieldProblem::Title)
     );
     assert_eq!(
         invalid(Secret::new("x").with_username("al\nice")),
-        err(InvalidSecret::Username)
+        err(FieldProblem::Username)
     );
     assert_eq!(
         invalid(Secret::new("x").with_password(HiddenValue::new(String::new()))),
-        err(InvalidSecret::Password)
+        err(FieldProblem::Password)
     );
     assert_eq!(
         invalid(Secret::new("x").with_password(HiddenValue::new("a".repeat(1025)))),
-        err(InvalidSecret::Password)
+        err(FieldProblem::Password)
     );
     assert_eq!(
         invalid(Secret::new("x").with_url("https://x\u{7}")),
-        err(InvalidSecret::Url)
+        err(FieldProblem::Url)
     );
     assert_eq!(
         invalid(Secret::new("x").with_notes("bell\u{7}")),
-        err(InvalidSecret::Notes)
+        err(FieldProblem::Notes)
     );
     assert_eq!(
         invalid(Secret::new("x").with_tag("work").with_tag("WORK")),
-        err(InvalidSecret::DuplicateTag)
+        err(FieldProblem::DuplicateTag(1))
     );
     assert_eq!(
         invalid((0..33).fold(Secret::new("x"), |s, i| s.with_tag(format!("t{i}")))),
-        err(InvalidSecret::TooManyTags)
+        err(FieldProblem::TooManyTags)
     );
     assert_eq!(
         invalid(Secret::new("x").with_custom_field(CustomField::plain("Password", "y"))),
-        err(InvalidSecret::DuplicateCustomFieldName)
+        err(FieldProblem::DuplicateCustomFieldName(0))
     );
     assert_eq!(
         invalid(
@@ -642,12 +655,116 @@ fn titles_and_fields_are_validated() {
                 .with_custom_field(CustomField::plain("pin", "1"))
                 .with_custom_field(CustomField::plain("PIN", "2"))
         ),
-        err(InvalidSecret::DuplicateCustomFieldName)
+        err(FieldProblem::DuplicateCustomFieldName(1))
     );
     assert_eq!(
         invalid(Secret::new("x").with_custom_field(CustomField::plain("pin", ""))),
-        err(InvalidSecret::CustomFieldValue)
+        err(FieldProblem::CustomFieldValue(0))
     );
+}
+
+#[test]
+fn every_invalid_field_is_reported_at_once() {
+    let secret = Secret::new("   ")
+        .with_url("https://x\u{7}")
+        .with_tag("work")
+        .with_tag("")
+        .with_tag("WORK")
+        .with_custom_field(CustomField::plain("region", "r".repeat(1025)))
+        .with_custom_field(CustomField::plain("", ""))
+        .with_custom_field(CustomField::plain("REGION", "eu"));
+
+    let found = problems(save_result(secret)).unwrap();
+    assert_eq!(
+        found,
+        [
+            FieldProblem::Title,
+            FieldProblem::Url,
+            FieldProblem::Tag(1),
+            FieldProblem::DuplicateTag(2),
+            FieldProblem::CustomFieldValue(0),
+            FieldProblem::CustomFieldName(1),
+            FieldProblem::CustomFieldValue(1),
+            FieldProblem::DuplicateCustomFieldName(2),
+        ]
+    );
+    let located: Vec<_> = found
+        .iter()
+        .map(|problem| (problem.field(), problem.index(), problem.part()))
+        .collect();
+    assert_eq!(
+        located,
+        [
+            (SecretField::Title, None, None),
+            (SecretField::Url, None, None),
+            (SecretField::Tags, Some(1), None),
+            (SecretField::Tags, Some(2), None),
+            (
+                SecretField::CustomFields,
+                Some(0),
+                Some(CustomFieldPart::Value)
+            ),
+            (
+                SecretField::CustomFields,
+                Some(1),
+                Some(CustomFieldPart::Name)
+            ),
+            (
+                SecretField::CustomFields,
+                Some(1),
+                Some(CustomFieldPart::Value)
+            ),
+            (
+                SecretField::CustomFields,
+                Some(2),
+                Some(CustomFieldPart::Name)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn too_many_tags_and_custom_fields_are_reported_with_the_others() {
+    let secret = (0..33)
+        .fold(Secret::new("x"), |s, i| s.with_tag(format!("t{i}")))
+        .with_tag("")
+        .with_username("");
+    let secret = (0..33).fold(secret, |s, i| {
+        s.with_custom_field(CustomField::plain(format!("f{i}"), "v"))
+    });
+    assert_eq!(
+        problems(save_result(secret)).unwrap(),
+        [
+            FieldProblem::Username,
+            FieldProblem::TooManyTags,
+            FieldProblem::Tag(33),
+            FieldProblem::TooManyCustomFields,
+        ]
+    );
+}
+
+#[test]
+fn problem_messages_state_the_rule_and_never_the_value() {
+    let secret = Secret::new("zebracorn\u{1b}")
+        .with_password(HiddenValue::new("zebracorn\u{7}".to_owned()))
+        .with_tag("zebracorn\u{7}")
+        .with_custom_field(CustomField::hidden(
+            "zebracorn\u{7}",
+            HiddenValue::new("zebracorn\u{7}".to_owned()),
+        ));
+    let Err(SessionError::InvalidSecret(invalid)) = save_result(secret) else {
+        panic!("expected a refused secret");
+    };
+    assert_eq!(invalid.problems().len(), 5);
+    assert_eq!(
+        invalid.problems()[0].to_string(),
+        "title must be 1-64 characters, without control characters"
+    );
+    for problem in invalid.problems() {
+        assert!(!problem.to_string().contains("zebracorn"), "{problem}");
+    }
+    assert!(!invalid.to_string().contains("zebracorn"));
+    assert!(!format!("{invalid:?}").contains("zebracorn"));
 }
 
 #[test]

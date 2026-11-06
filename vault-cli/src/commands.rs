@@ -81,13 +81,17 @@ impl CommandError {
 }
 
 impl fmt::Display for CommandError {
-    /// Writes the fixed message for this error.
+    /// Writes the fixed message for this error; a refused save lists every problem, one
+    /// per line ([`render::invalid_secret`]).
     ///
     /// ```ignore
     /// assert_eq!(CommandError::PasswordsDiffer.to_string(), "master passwords don't match");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Session(SessionError::InvalidSecret(invalid)) => {
+                f.write_str(&render::invalid_secret(invalid))
+            }
             Self::Session(err) => err.fmt(f),
             Self::Terminal(err) => err.fmt(f),
             Self::Generator(err) => err.fmt(f),

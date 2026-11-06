@@ -22,13 +22,14 @@ use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use vault_core::generator::{self, DEFAULT_PASSWORD_LENGTH};
 use vault_core::session::{
-    CustomField, FieldValue, HiddenValue, InvalidSecret, Secret, Session, SessionError,
+    CustomField, CustomFieldPart, FieldProblem, FieldValue, HiddenValue, InvalidSecret, Secret,
+    SecretField, Session, SessionError,
 };
 use vault_core::storage::FileStore;
 
 use crate::AppState;
-use crate::api::ApiError;
 use crate::api::secrets::{SecretDetail, read_error};
+use crate::api::{ApiError, FieldError};
 use crate::auth::CurrentSession;
 use crate::json::StrictJson;
 
@@ -247,7 +248,7 @@ const CUSTOM_FIELDS: &str = "custom_fields";
 /// An absent or empty password is generated on the server.
 ///
 /// Errors: 409 (`"field": "title"`) if a secret has this title (ignoring case and
-/// surrounding spaces); 400 with `"field"` for a field breaking the rules; 413 if the
+/// surrounding spaces); 400 with `"fields"` listing every field breaking the rules; 413 if the
 /// vault is full (the session stays open); 401 on a save conflict, which locks the
 /// session.
 ///
@@ -278,7 +279,8 @@ pub(crate) async fn add(
 /// `{"unchanged": true}` keep their stored value; `created_at` is kept too.
 ///
 /// Errors: 404 for an unknown title; 400 with `"field"` for a changed title, an
-/// `unchanged` marker with nothing stored to keep, or a field breaking the rules; 413
+/// `unchanged` marker with nothing stored to keep; 400 with `"fields"` listing every
+/// field breaking the rules; 413
 /// if the vault is full (the session stays open); 401 on a save conflict, which locks
 /// the session.
 ///
@@ -353,8 +355,8 @@ fn save(
     }))
 }
 
-/// Maps a failure changing the vault: a field breaking the rules is a 400 naming the
-/// request field, a full vault a 413 that leaves the session open, the rest as when
+/// Maps a failure changing the vault: a refused secret is a 400 listing every problem
+/// by request field, a full vault a 413 that leaves the session open, the rest as when
 /// reading ([`read_error`]); a conflict has locked the session, so it never gets here.
 ///
 /// ```ignore
@@ -362,30 +364,48 @@ fn save(
 /// ```
 fn write_error(err: SessionError) -> ApiError {
     match err {
-        SessionError::InvalidSecret(invalid) => {
-            ApiError::field(field_of(invalid), invalid.to_string())
-        }
+        SessionError::InvalidSecret(invalid) => invalid_secret(&invalid),
         SessionError::VaultFull => ApiError::VAULT_FULL,
         err => read_error(err),
     }
 }
 
-/// The request field a validation error is about.
+/// The 400 for a refused secret: each problem with its request field name, 0-based
+/// index and part, and its fixed message (never the value).
 ///
 /// ```ignore
-/// assert_eq!(field_of(InvalidSecret::DuplicateTag), "tags");
+/// SessionError::InvalidSecret(invalid) => invalid_secret(&invalid),
 /// ```
-fn field_of(invalid: InvalidSecret) -> &'static str {
-    match invalid {
-        InvalidSecret::Title => TITLE,
-        InvalidSecret::Username => USERNAME,
-        InvalidSecret::Password => PASSWORD,
-        InvalidSecret::Url => URL,
-        InvalidSecret::Notes => NOTES,
-        InvalidSecret::TooManyTags | InvalidSecret::Tag | InvalidSecret::DuplicateTag => TAGS,
-        InvalidSecret::TooManyCustomFields
-        | InvalidSecret::CustomFieldName
-        | InvalidSecret::CustomFieldValue
-        | InvalidSecret::DuplicateCustomFieldName => CUSTOM_FIELDS,
+fn invalid_secret(invalid: &InvalidSecret) -> ApiError {
+    let fields = invalid
+        .problems()
+        .iter()
+        .map(|problem: &FieldProblem| FieldError {
+            field: request_field(problem.field()),
+            index: problem.index(),
+            part: problem.part().map(|part| match part {
+                CustomFieldPart::Name => "name",
+                CustomFieldPart::Value => "value",
+            }),
+            message: problem.to_string(),
+        })
+        .collect();
+    ApiError::invalid_secret(fields)
+}
+
+/// The request's JSON field name for a field of a secret.
+///
+/// ```ignore
+/// assert_eq!(request_field(SecretField::CustomFields), "custom_fields");
+/// ```
+fn request_field(field: SecretField) -> &'static str {
+    match field {
+        SecretField::Title => TITLE,
+        SecretField::Username => USERNAME,
+        SecretField::Password => PASSWORD,
+        SecretField::Url => URL,
+        SecretField::Notes => NOTES,
+        SecretField::Tags => TAGS,
+        SecretField::CustomFields => CUSTOM_FIELDS,
     }
 }

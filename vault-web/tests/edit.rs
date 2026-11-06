@@ -391,93 +391,119 @@ async fn changes_require_the_csrf_token() {
 }
 
 #[tokio::test]
-async fn field_errors_name_the_field_and_never_echo_the_value() {
+async fn refused_secrets_list_every_field_and_never_echo_a_value() {
     let app = TestApp::new();
     let alice = app.create_vault("alice").await;
     let marker = "zebracorn";
     let long = |n: usize| format!("{marker}{}", "x".repeat(n));
     let field = |name: &str, hidden: bool, value: Value| json!({"name": name, "hidden": hidden, "value": value});
+    let at = |field: &str, index: Option<usize>, part: Option<&str>| {
+        let mut location = json!({"field": field});
+        if let Some(index) = index {
+            location["index"] = json!(index);
+        }
+        if let Some(part) = part {
+            location["part"] = json!(part);
+        }
+        vec![location]
+    };
 
     let cases = [
-        ("empty title", json!({"title": ""}), "title"),
-        ("blank title", json!({"title": "   "}), "title"),
-        ("long title", json!({"title": long(64)}), "title"),
+        ("empty title", json!({"title": ""}), at("title", None, None)),
+        (
+            "blank title",
+            json!({"title": "   "}),
+            at("title", None, None),
+        ),
+        (
+            "long title",
+            json!({"title": long(64)}),
+            at("title", None, None),
+        ),
         (
             "escape in title",
             json!({"title": format!("{marker}\u{1b}[2J")}),
-            "title",
+            at("title", None, None),
         ),
         (
             "bidi override in title",
             json!({"title": format!("{marker}\u{202e}")}),
-            "title",
+            at("title", None, None),
         ),
         (
             "empty username",
             json!({"title": "t", "username": ""}),
-            "username",
+            at("username", None, None),
         ),
         (
             "newline in username",
             json!({"title": "t", "username": format!("{marker}\n")}),
-            "username",
+            at("username", None, None),
         ),
         (
             "long password",
             json!({"title": "t", "password": long(1024)}),
-            "password",
+            at("password", None, None),
         ),
         (
             "control in password",
             json!({"title": "t", "password": format!("{marker}\u{7}")}),
-            "password",
+            at("password", None, None),
         ),
-        ("long URL", json!({"title": "t", "url": long(2048)}), "url"),
+        (
+            "long URL",
+            json!({"title": "t", "url": long(2048)}),
+            at("url", None, None),
+        ),
         (
             "escape in notes",
             json!({"title": "t", "notes": format!("{marker}\u{1b}")}),
-            "notes",
+            at("notes", None, None),
         ),
         (
             "long notes",
             json!({"title": "t", "notes": long(4096)}),
-            "notes",
+            at("notes", None, None),
         ),
-        ("empty tag", json!({"title": "t", "tags": [""]}), "tags"),
+        (
+            "empty tag",
+            json!({"title": "t", "tags": [""]}),
+            at("tags", Some(0), None),
+        ),
         (
             "duplicate tags",
             json!({"title": "t", "tags": ["Work", "work"]}),
-            "tags",
+            at("tags", Some(1), None),
         ),
         (
             "too many tags",
             json!({"title": "t", "tags": (0..33).map(|i| i.to_string()).collect::<Vec<_>>()}),
-            "tags",
+            at("tags", None, None),
         ),
         (
             "empty custom name",
             json!({"title": "t", "custom_fields": [field("", false, json!("v"))]}),
-            "custom_fields",
+            at("custom_fields", Some(0), Some("name")),
         ),
         (
             "standard field name",
             json!({"title": "t", "custom_fields": [field("Password", true, json!("v"))]}),
-            "custom_fields",
+            at("custom_fields", Some(0), Some("name")),
         ),
         (
             "empty custom value",
             json!({"title": "t", "custom_fields": [field("pin", true, json!(""))]}),
-            "custom_fields",
+            at("custom_fields", Some(0), Some("value")),
         ),
         (
             "long plain value",
             json!({"title": "t", "custom_fields": [field("region", false, json!(long(1024)))]}),
-            "custom_fields",
+            at("custom_fields", Some(0), Some("value")),
         ),
         (
             "duplicate custom names",
             json!({"title": "t", "custom_fields": [field("pin", false, json!("1")), field("PIN", true, json!("2"))]}),
-            "custom_fields",
+            at("custom_fields", Some(1), Some("name")),
         ),
     ];
     for (case, body, expected) in cases {
@@ -486,12 +512,61 @@ async fn field_errors_name_the_field_and_never_echo_the_value() {
         let text = body_text(response).await;
         assert!(!text.contains(marker), "{case}: {text}");
         let error: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(error["field"], expected, "{case}: {text}");
-        assert!(error["error"].is_string(), "{case}");
+        assert_eq!(
+            error["error"], "secret not saved: some fields are invalid",
+            "{case}"
+        );
+        assert!(error.get("field").is_none(), "{case}: {text}");
+        assert_eq!(locations(&error), expected, "{case}: {text}");
     }
+
+    let several = json!({
+        "title": format!("{marker}\u{1b}"),
+        "tags": ["work", "WORK"],
+        "custom_fields": [field("pin", true, json!(long(1024)))],
+    });
+    let response = app.send(alice.post_json("/api/secrets", &several)).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = body_text(response).await;
+    assert!(!text.contains(marker), "{text}");
+    let error: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        error["fields"],
+        json!([
+            {"field": "title", "message": "title must be 1-64 characters, without control characters"},
+            {"field": "tags", "index": 1, "message": "tags must differ by more than case"},
+            {
+                "field": "custom_fields",
+                "index": 0,
+                "part": "value",
+                "message": "custom field values must be 1-1024 characters (hidden: 1-1024), without control characters",
+            },
+        ])
+    );
+
     let list = expect(app.send(alice.get("/api/secrets")).await, StatusCode::OK).await;
     assert_eq!(list["secrets"], json!([]));
     assert!(!app.audit_log("alice").contains("secret_added"));
+}
+
+/// The `fields` of a refused-secret error without their messages, each checked to be
+/// a non-empty string.
+///
+/// ```text
+/// assert_eq!(locations(&error), [json!({"field": "tags", "index": 1})]);
+/// ```
+fn locations(error: &Value) -> Vec<Value> {
+    error["fields"]
+        .as_array()
+        .expect("a fields array")
+        .iter()
+        .map(|problem| {
+            let mut location = problem.clone();
+            let message = location.as_object_mut().unwrap().remove("message");
+            assert!(message.and_then(|m| m.as_str().map(|m| !m.is_empty())) == Some(true));
+            location
+        })
+        .collect()
 }
 
 #[tokio::test]

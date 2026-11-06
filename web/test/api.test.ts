@@ -250,3 +250,40 @@ test("a 409 on add is an error naming the title field, not a lock", async () => 
   });
   assert.equal(locked, 0);
 });
+
+test("a refused secret's problems are read from its fields array", async () => {
+  const refused = fakeFetch(400, {
+    error: "secret not saved: some fields are invalid",
+    fields: [
+      { field: "title", message: "title must be 1-64 characters, without control characters" },
+      { field: "tags", index: 1, message: "tags must differ by more than case" },
+      { field: "custom_fields", index: 0, part: "value", message: "custom field values must be ..." },
+      { field: "notes", index: "1", message: "a malformed entry is dropped" },
+      "not an object",
+    ],
+  });
+  const api = await unlockedApi(refused, () => {});
+
+  await assert.rejects(api.addSecret({ title: "", tags: [], custom_fields: [] }), (err: unknown) => {
+    assert.ok(err instanceof ApiError);
+    assert.equal(err.status, 400);
+    assert.equal(err.field, undefined);
+    assert.deepEqual(err.fields, [
+      { field: "title", message: "title must be 1-64 characters, without control characters" },
+      { field: "tags", index: 1, message: "tags must differ by more than case" },
+      { field: "custom_fields", index: 0, part: "value", message: "custom field values must be ..." },
+    ]);
+    return true;
+  });
+});
+
+test("an error without a fields array has no problems listed", async () => {
+  const taken = fakeFetch(409, { error: "a secret with this title already exists", field: "title" });
+  const api = await unlockedApi(taken, () => {});
+
+  await assert.rejects(api.addSecret({ title: "GitHub", tags: [], custom_fields: [] }), (err: unknown) => {
+    assert.ok(err instanceof ApiError);
+    assert.deepEqual(err.fields, []);
+    return true;
+  });
+});

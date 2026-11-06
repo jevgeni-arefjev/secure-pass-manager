@@ -26,7 +26,15 @@ import {
 } from "./api.js";
 import { checkNewMasterPassword, parseIdleTimeout } from "./forms.js";
 import { copyThenClear, CLEAR_CLIPBOARD_AFTER_MS, RevealedField } from "./reveal.js";
-import { type CustomFieldValues, editValues, emptyCustomField, emptyValues, secretRequest } from "./secret-form.js";
+import {
+  type CustomFieldErrors,
+  type CustomFieldValues,
+  editValues,
+  emptyCustomField,
+  emptyValues,
+  placeFieldErrors,
+  secretRequest,
+} from "./secret-form.js";
 import { filterSecrets } from "./secrets.js";
 import { watchSession } from "./session-watch.js";
 import { displayText } from "./text.js";
@@ -788,11 +796,16 @@ function hiddenControl(input: HTMLInputElement, keepStored: boolean, onChange: (
   return { element, isUnchanged: () => unchanged };
 }
 
-/** One custom field in the secret form: its row, its current values and a way to wipe it. */
+/**
+ * One custom field in the secret form: its row, its current values, a way to wipe it,
+ * and ways to show and clear errors under its name and value.
+ */
 interface CustomFieldRow {
   row: HTMLElement;
   values: () => CustomFieldValues;
   clear: () => void;
+  showErrors: (errors: CustomFieldErrors) => void;
+  clearErrors: () => void;
 }
 
 /** Numbers the custom field rows, so each input gets a unique ID for its label. */
@@ -839,16 +852,20 @@ function customFieldRow(initial: CustomFieldValues, onRemove: () => void): Custo
   });
   name.readOnly = initial.unchanged;
   hidden.disabled = initial.unchanged;
+  const nameLabel = labelled("Name", name, "name");
+  const nameError = fieldErrorLine();
+  nameLabel.append(nameError);
   const valueLabel = labelled("Value", value, "value");
   const control = hiddenControl(value, initial.unchanged, () => {
     name.readOnly = false;
     hidden.disabled = false;
   });
-  valueLabel.append(control.element);
+  const valueError = fieldErrorLine();
+  valueLabel.append(control.element, valueError);
   const remove = button("Remove", "button");
   const row = document.createElement("div");
   row.className = "custom-field";
-  row.append(labelled("Name", name, "name"), labelled("Hidden", hidden, "hidden"), valueLabel, remove);
+  row.append(nameLabel, labelled("Hidden", hidden, "hidden"), valueLabel, remove);
   remove.addEventListener("click", () => {
     value.value = "";
     row.remove();
@@ -859,6 +876,14 @@ function customFieldRow(initial: CustomFieldValues, onRemove: () => void): Custo
     values: () => ({ name: name.value, hidden: hidden.checked, value: value.value, unchanged: control.isUnchanged() }),
     clear: () => {
       value.value = "";
+    },
+    showErrors: (errors) => {
+      nameError.textContent = errors.name.join("; ");
+      valueError.textContent = errors.value.join("; ");
+    },
+    clearErrors: () => {
+      nameError.textContent = "";
+      valueError.textContent = "";
     },
   };
 }
@@ -954,6 +979,9 @@ function showSecretForm(stored: SecretDetail | null): void {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     clearErrors(Object.values(targets), formError);
+    for (const row of rows) {
+      row.clearErrors();
+    }
     const request = secretRequest({
       title: stored?.title ?? title.input.value,
       username: username.input.value,
@@ -964,6 +992,8 @@ function showSecretForm(stored: SecretDetail | null): void {
       tags: tags.input.value,
       customFields: rows.map((row) => row.values()),
     });
+    // Problems name rows by their index in this request, so keep the rows as sent.
+    const sentRows = [...rows];
     const generation = pageGeneration;
     submit.disabled = true;
     (stored === null ? api.addSecret(request) : api.editSecret(request)).then(
@@ -974,7 +1004,11 @@ function showSecretForm(stored: SecretDetail | null): void {
       },
       (err: unknown) => {
         if (generation === pageGeneration) {
-          showError(err, targets, formError);
+          if (err instanceof ApiError && err.fields.length > 0) {
+            showFieldProblems(err, request.tags, targets, sentRows, formError);
+          } else {
+            showError(err, targets, formError);
+          }
           submit.disabled = false;
         }
       },
@@ -993,6 +1027,42 @@ function showSecretForm(stored: SecretDetail | null): void {
     }
   });
   (stored === null ? title.input : username.input).focus();
+}
+
+/**
+ * Shows every problem of a refused secret next to its input (tags naming the tag) or
+ * on its custom field row's name or value; problems with no place on the form, and
+ * the server's generic message, go in `general`. Text only, never HTML.
+ *
+ * @example
+ * showFieldProblems(err, request.tags, targets, rows, formError);
+ */
+function showFieldProblems(
+  err: ApiError,
+  tags: readonly string[],
+  targets: Record<string, ErrorTarget>,
+  rows: readonly CustomFieldRow[],
+  general: HTMLElement,
+): void {
+  const placed = placeFieldErrors(err.fields, tags);
+  const leftOver = [...placed.general];
+  for (const [field, messages] of Object.entries(placed.fields)) {
+    const target = targets[field];
+    if (target === undefined) {
+      leftOver.push(...messages);
+    } else {
+      target.error.textContent = messages.join("; ");
+    }
+  }
+  for (const [index, errors] of Object.entries(placed.customFields)) {
+    const row = rows[Number(index)];
+    if (row === undefined) {
+      leftOver.push(...errors.name, ...errors.value);
+    } else {
+      row.showErrors(errors);
+    }
+  }
+  general.textContent = [err.message, ...leftOver].join("; ");
 }
 
 /**

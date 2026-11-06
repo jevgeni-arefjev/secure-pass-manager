@@ -15,6 +15,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::LockedBytes;
 
+mod invalid;
+
+pub use invalid::{CustomFieldPart, FieldProblem, InvalidSecret, SecretField};
+
 /// Longest title, in characters.
 const MAX_TITLE: usize = 64;
 /// Longest username, in characters.
@@ -590,10 +594,12 @@ impl Secret {
             .all(HiddenValue::is_memory_locked)
     }
 
-    /// Trims the title and checks every field against the rules on [`InvalidSecret`].
+    /// Trims the title and checks every field against the rules on [`FieldProblem`],
+    /// collecting every problem rather than stopping at the first.
     ///
     /// Security: this is where control characters are refused, so nothing saved can
-    /// drive a terminal when it is printed later.
+    /// drive a terminal when it is printed later. Problems name the field, never the
+    /// value.
     ///
     /// ```ignore
     /// secret.validate()?;
@@ -603,157 +609,97 @@ impl Secret {
         if trimmed.len() != self.title.len() {
             self.title = Zeroizing::new(trimmed.to_owned());
         }
-        check_text(&self.title, MAX_TITLE, false).ok_or(InvalidSecret::Title)?;
-        if let Some(username) = &self.username {
-            check_text(username, MAX_USERNAME, false).ok_or(InvalidSecret::Username)?;
-        }
-        if let Some(password) = &self.password {
-            check_text(password.reveal(), MAX_HIDDEN, false).ok_or(InvalidSecret::Password)?;
-        }
-        if let Some(url) = &self.url {
-            check_text(url, MAX_URL, false).ok_or(InvalidSecret::Url)?;
-        }
-        if let Some(notes) = &self.notes {
-            check_text(notes, MAX_NOTES, true).ok_or(InvalidSecret::Notes)?;
-        }
-        self.validate_tags()?;
-        self.validate_custom_fields()
+        let mut problems = Vec::new();
+        let mut check = |text: Option<&str>, max: usize, multiline: bool, problem| {
+            if text.is_some_and(|text| check_text(text, max, multiline).is_none()) {
+                problems.push(problem);
+            }
+        };
+        check(Some(&self.title), MAX_TITLE, false, FieldProblem::Title);
+        check(
+            self.username.as_deref().map(String::as_str),
+            MAX_USERNAME,
+            false,
+            FieldProblem::Username,
+        );
+        check(
+            self.password.as_ref().map(HiddenValue::reveal),
+            MAX_HIDDEN,
+            false,
+            FieldProblem::Password,
+        );
+        check(
+            self.url.as_deref().map(String::as_str),
+            MAX_URL,
+            false,
+            FieldProblem::Url,
+        );
+        check(
+            self.notes.as_deref().map(String::as_str),
+            MAX_NOTES,
+            true,
+            FieldProblem::Notes,
+        );
+        self.check_tags(&mut problems);
+        self.check_custom_fields(&mut problems);
+        InvalidSecret::from_problems(problems)
     }
 
-    /// Checks the tag count, each tag, and that no two tags differ only in case.
+    /// Adds to `problems` a too-high tag count, each broken tag, and each tag that
+    /// differs from an earlier one only in case.
     ///
     /// ```ignore
-    /// self.validate_tags()?;
+    /// self.check_tags(&mut problems);
     /// ```
-    fn validate_tags(&self) -> Result<(), InvalidSecret> {
+    fn check_tags(&self, problems: &mut Vec<FieldProblem>) {
         if self.tags.len() > MAX_TAGS {
-            return Err(InvalidSecret::TooManyTags);
+            problems.push(FieldProblem::TooManyTags);
         }
         for (i, tag) in self.tags.iter().enumerate() {
-            check_text(tag, MAX_TAG, false).ok_or(InvalidSecret::Tag)?;
-            if self.tags[..i]
+            if check_text(tag, MAX_TAG, false).is_none() {
+                problems.push(FieldProblem::Tag(i));
+            } else if self.tags[..i]
                 .iter()
                 .any(|seen| same_ignoring_case(seen, tag))
             {
-                return Err(InvalidSecret::DuplicateTag);
+                problems.push(FieldProblem::DuplicateTag(i));
             }
         }
-        Ok(())
     }
 
-    /// Checks the custom field count, each name and value, and that names are unique
-    /// (ignoring case) and don't reuse a standard field name.
+    /// Adds to `problems` a too-high custom field count, each broken name and value,
+    /// and each name that repeats an earlier one (ignoring case) or a standard field
+    /// name.
     ///
     /// ```ignore
-    /// self.validate_custom_fields()?;
+    /// self.check_custom_fields(&mut problems);
     /// ```
-    fn validate_custom_fields(&self) -> Result<(), InvalidSecret> {
+    fn check_custom_fields(&self, problems: &mut Vec<FieldProblem>) {
         if self.custom_fields.len() > MAX_CUSTOM_FIELDS {
-            return Err(InvalidSecret::TooManyCustomFields);
+            problems.push(FieldProblem::TooManyCustomFields);
         }
         for (i, field) in self.custom_fields.iter().enumerate() {
-            check_text(&field.name, MAX_FIELD_NAME, false).ok_or(InvalidSecret::CustomFieldName)?;
-            let value = match &field.value {
-                FieldValue::Plain(text) => text.as_str(),
-                FieldValue::Hidden(hidden) => hidden.reveal(),
-            };
-            let max = if field.value.is_hidden() {
-                MAX_HIDDEN
-            } else {
-                MAX_FIELD_VALUE
-            };
-            check_text(value, max, false).ok_or(InvalidSecret::CustomFieldValue)?;
-            let reused = STANDARD_FIELD_NAMES
+            if check_text(&field.name, MAX_FIELD_NAME, false).is_none() {
+                problems.push(FieldProblem::CustomFieldName(i));
+            } else if STANDARD_FIELD_NAMES
                 .iter()
                 .any(|standard| same_ignoring_case(standard, &field.name))
                 || self.custom_fields[..i]
                     .iter()
-                    .any(|seen| same_ignoring_case(&seen.name, &field.name));
-            if reused {
-                return Err(InvalidSecret::DuplicateCustomFieldName);
+                    .any(|seen| same_ignoring_case(&seen.name, &field.name))
+            {
+                problems.push(FieldProblem::DuplicateCustomFieldName(i));
+            }
+            let (value, max) = match &field.value {
+                FieldValue::Plain(text) => (text.as_str(), MAX_FIELD_VALUE),
+                FieldValue::Hidden(hidden) => (hidden.reveal(), MAX_HIDDEN),
+            };
+            if check_text(value, max, false).is_none() {
+                problems.push(FieldProblem::CustomFieldValue(i));
             }
         }
-        Ok(())
     }
 }
-
-/// Why a secret was refused. Messages state the rule, never the value.
-///
-/// ```
-/// use vault_core::session::InvalidSecret;
-/// assert_eq!(
-///     InvalidSecret::Title.to_string(),
-///     "title must be 1-64 characters, without control characters"
-/// );
-/// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InvalidSecret {
-    /// Title empty after trimming, over 64 characters, or with control characters.
-    Title,
-    /// Username empty, over 256 characters, or with control characters.
-    Username,
-    /// Password empty, over 1024 characters, or with control characters.
-    Password,
-    /// URL empty, over 2048 characters, or with control characters.
-    Url,
-    /// Notes empty, over 4096 characters, or with control characters other than
-    /// newlines and tabs.
-    Notes,
-    /// More than 32 tags.
-    TooManyTags,
-    /// A tag empty, over 32 characters, or with control characters.
-    Tag,
-    /// Two tags that differ only in case.
-    DuplicateTag,
-    /// More than 32 custom fields.
-    TooManyCustomFields,
-    /// A custom field name empty, over 64 characters, or with control characters.
-    CustomFieldName,
-    /// A custom field value empty, over 1024 characters, or with control characters.
-    CustomFieldValue,
-    /// Two custom fields with the same name (ignoring case), or one named like a
-    /// standard field.
-    DuplicateCustomFieldName,
-}
-
-impl fmt::Display for InvalidSecret {
-    /// Writes the rule that was broken.
-    ///
-    /// ```
-    /// # use vault_core::session::InvalidSecret;
-    /// assert_eq!(InvalidSecret::TooManyTags.to_string(), "a secret can have at most 32 tags");
-    /// ```
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let rule = |field: &str, max: usize| {
-            format!("{field} must be 1-{max} characters, without control characters")
-        };
-        let message = match self {
-            Self::Title => rule("title", MAX_TITLE),
-            Self::Username => rule("username", MAX_USERNAME),
-            Self::Password => rule("password", MAX_HIDDEN),
-            Self::Url => rule("URL", MAX_URL),
-            Self::Notes => format!(
-                "notes must be 1-{MAX_NOTES} characters, without control characters other than newlines and tabs"
-            ),
-            Self::TooManyTags => format!("a secret can have at most {MAX_TAGS} tags"),
-            Self::Tag => rule("each tag", MAX_TAG),
-            Self::DuplicateTag => "tags must differ by more than case".to_owned(),
-            Self::TooManyCustomFields => {
-                format!("a secret can have at most {MAX_CUSTOM_FIELDS} custom fields")
-            }
-            Self::CustomFieldName => rule("custom field names", MAX_FIELD_NAME),
-            Self::CustomFieldValue => format!(
-                "custom field values must be 1-{MAX_FIELD_VALUE} characters (hidden: 1-{MAX_HIDDEN}), without control characters"
-            ),
-            Self::DuplicateCustomFieldName => {
-                "custom field names must be unique and differ from the standard fields".to_owned()
-            }
-        };
-        f.write_str(&message)
-    }
-}
-
-impl std::error::Error for InvalidSecret {}
 
 /// `Some(())` if `text` is 1..=`max` characters and has no control characters
 /// (newlines and tabs allowed only when `multiline`).

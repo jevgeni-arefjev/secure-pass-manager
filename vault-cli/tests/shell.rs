@@ -627,6 +627,34 @@ fn an_invalid_field_is_reported_and_nothing_is_saved() {
 }
 
 #[test]
+fn every_invalid_field_of_a_refused_save_is_printed() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("save x"),
+        line("alice"),
+        hidden(&"x".repeat(1025)), // password
+        line(""),                  // URL
+        line(""),                  // notes
+        line("work, WORK"),        // tags
+        line("y"),                 // add a custom field
+        line("pin"),
+        line("n"), // not hidden
+        line(""),  // empty value
+        line("n"), // no more custom fields
+        line("list"),
+    ];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    let expected = "vault: secret not saved:\n\
+        \x20 password: password must be 1-1024 characters, without control characters\n\
+        \x20 tag 2: tags must differ by more than case\n\
+        \x20 custom field 1 value: custom field values must be 1-1024 characters (hidden: 1-1024), without control characters";
+    assert!(t.stderr().contains(expected), "{}", t.stderr());
+    assert!(!t.stderr().contains("xxxx"));
+    assert!(t.stdout().contains("no secrets yet"));
+}
+
+#[test]
 fn a_refused_paste_cancels_save_with_its_message_and_the_shell_goes_on() {
     let fx = Fixture::with_alice();
     let script = vec![

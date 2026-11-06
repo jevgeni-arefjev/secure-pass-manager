@@ -105,8 +105,23 @@ const GENERIC_ERROR = "request failed";
 const UNLOCK_PATH = "/api/unlock";
 
 /**
+ * One problem of a refused secret: the request field, the 0-based index of the tag or
+ * custom field, for a custom field whether its name or value is at fault, and the
+ * server's message (which never contains the value).
+ */
+/** The part of a custom field a {@link FieldProblem} is about. */
+export type CustomFieldPart = "name" | "value";
+
+export interface FieldProblem {
+  field: string;
+  index?: number;
+  part?: CustomFieldPart;
+  message: string;
+}
+
+/**
  * A failed API call: the HTTP status, the server's message and, for a validation
- * error, the request field at fault.
+ * error, the request field at fault; for a refused secret, every problem in `fields`.
  *
  * @example
  * if (err instanceof ApiError && err.field === "vaultname") showFieldError(err.message);
@@ -114,18 +129,21 @@ const UNLOCK_PATH = "/api/unlock";
 export class ApiError extends Error {
   readonly status: number;
   readonly field: string | undefined;
+  readonly fields: readonly FieldProblem[];
 
   /**
-   * An error for a response with `status`, `message` and an optional `field`.
+   * An error for a response with `status`, `message`, an optional `field` and, for a
+   * refused secret, its `fields`.
    *
    * @example
    * throw new ApiError(400, "vaultname taken", "vaultname");
    */
-  constructor(status: number, message: string, field?: string) {
+  constructor(status: number, message: string, field?: string, fields: readonly FieldProblem[] = []) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.field = field;
+    this.fields = fields;
   }
 }
 
@@ -326,8 +344,8 @@ export class Api {
 }
 
 /**
- * The {@link ApiError} for a failed `response`, from its `{"error", "field"}` body or,
- * failing that, a generic message.
+ * The {@link ApiError} for a failed `response`, from its `{"error", "field"}` or
+ * `{"error", "fields"}` body or, failing that, a generic message.
  *
  * @example
  * throw await errorFrom(response);
@@ -337,10 +355,45 @@ async function errorFrom(response: Response): Promise<ApiError> {
     const body: unknown = await response.json();
     if (typeof body === "object" && body !== null && "error" in body && typeof body.error === "string") {
       const field = "field" in body && typeof body.field === "string" ? body.field : undefined;
-      return new ApiError(response.status, body.error, field);
+      const fields = "fields" in body ? fieldProblems(body.fields) : [];
+      return new ApiError(response.status, body.error, field, fields);
     }
   } catch {
     // Not JSON: fall through to the generic message.
   }
   return new ApiError(response.status, GENERIC_ERROR);
+}
+
+/**
+ * The well-formed {@link FieldProblem}s in a response's `fields`; anything else is
+ * dropped.
+ *
+ * @example
+ * fieldProblems([{ field: "title", message: "bad title" }, 42]); // just the first
+ */
+function fieldProblems(fields: unknown): FieldProblem[] {
+  if (!Array.isArray(fields)) {
+    return [];
+  }
+  const problems: FieldProblem[] = [];
+  for (const entry of fields as unknown[]) {
+    if (typeof entry !== "object" || entry === null) {
+      continue;
+    }
+    const { field, index, part, message } = entry as Record<string, unknown>;
+    const validIndex = index === undefined || (typeof index === "number" && Number.isInteger(index) && index >= 0);
+    const validPart = part === undefined || part === "name" || part === "value";
+    if (typeof field !== "string" || typeof message !== "string" || !validIndex || !validPart) {
+      continue;
+    }
+    const problem: FieldProblem = { field, message };
+    if (index !== undefined) {
+      problem.index = index as number;
+    }
+    if (part !== undefined) {
+      problem.part = part as CustomFieldPart;
+    }
+    problems.push(problem);
+  }
+  return problems;
 }

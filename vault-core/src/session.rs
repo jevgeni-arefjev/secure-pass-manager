@@ -64,7 +64,10 @@ pub use master_password_policy::{
     MAX_MASTER_PASSWORD_CHARS, MIN_MASTER_PASSWORD_CHARS, WeakMasterPassword,
     check as check_master_password,
 };
-pub use secret::{CustomField, FieldValue, HiddenValue, InvalidSecret, Secret};
+pub use secret::{
+    CustomField, CustomFieldPart, FieldProblem, FieldValue, HiddenValue, InvalidSecret, Secret,
+    SecretField,
+};
 
 /// Idle time after which a session locks itself, unless configured otherwise.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -122,7 +125,7 @@ impl SessionConfig {
 /// use vault_core::session::SessionError;
 /// assert_eq!(SessionError::UnlockFailed.to_string(), "wrong vaultname or master password");
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionError {
     /// No vault with this vaultname, a wrong master password, or a tampered header.
     /// Deliberately indistinguishable.
@@ -140,7 +143,7 @@ pub enum SessionError {
     Conflict,
     /// No secret with this title.
     SecretNotFound,
-    /// A secret breaks the field rules.
+    /// A secret breaks the field rules; carries every problem found.
     InvalidSecret(InvalidSecret),
     /// Saving would make the vault file too large to open again. Nothing was written
     /// and the session stays unlocked; remove or shorten secrets to make room.
@@ -250,9 +253,8 @@ impl From<BackupError> for SessionError {
 impl From<InvalidSecret> for SessionError {
     /// Wraps a field rule failure.
     ///
-    /// ```
-    /// # use vault_core::session::{InvalidSecret, SessionError};
-    /// let err = SessionError::from(InvalidSecret::Title);
+    /// ```ignore
+    /// secret.validate()?; // an InvalidSecret becomes SessionError::InvalidSecret
     /// ```
     fn from(err: InvalidSecret) -> Self {
         Self::InvalidSecret(err)

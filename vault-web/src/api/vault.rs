@@ -119,7 +119,7 @@ pub(crate) async fn create(
 fn create_error(err: SessionError) -> ApiError {
     match err {
         SessionError::InvalidVaultname | SessionError::WeakMasterPassword(_) => {
-            ApiError::field(error_field(err), err.to_string())
+            ApiError::field(error_field(&err), err.to_string())
         }
         SessionError::VaultExists => ApiError::VAULTNAME_TAKEN,
         _ => ApiError::INTERNAL,
@@ -273,9 +273,9 @@ fn session_config(state: &AppState, idle_timeout: Duration) -> SessionConfig {
 /// The request field a create validation error is about.
 ///
 /// ```ignore
-/// assert_eq!(error_field(SessionError::InvalidVaultname), "vaultname");
+/// assert_eq!(error_field(&SessionError::InvalidVaultname), "vaultname");
 /// ```
-fn error_field(err: SessionError) -> &'static str {
+fn error_field(err: &SessionError) -> &'static str {
     match err {
         SessionError::InvalidVaultname => "vaultname",
         _ => "master_password",

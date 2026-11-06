@@ -1,5 +1,5 @@
-//! Turns secrets and audit events into terminal text: the `get` view, the `list` table
-//! and the `log` view.
+//! Turns secrets and audit events into terminal text: the `get` view, the `list` table,
+//! the `log` view and the problems of a refused save.
 //!
 //! Security:
 //! - Every stored text is escaped before it reaches the terminal ([`escape`]): control
@@ -15,7 +15,9 @@ use std::fmt::{Display, Write};
 use chrono::{TimeZone, Utc};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vault_core::audit::{Event, Line};
-use vault_core::session::{FieldValue, HiddenValue, Secret};
+use vault_core::session::{
+    CustomFieldPart, FieldProblem, FieldValue, HiddenValue, InvalidSecret, Secret, SecretField,
+};
 use zeroize::Zeroizing;
 
 /// What a masked hidden field looks like.
@@ -352,4 +354,57 @@ fn truncate(text: &str) -> Zeroizing<String> {
 /// ```
 fn pad(out: &mut String, n: usize) {
     out.extend(std::iter::repeat_n(' ', n));
+}
+
+/// Every problem of a refused save, one per line under a heading, each labelled with
+/// the field it is about (tags and custom fields numbered from 1, as entered).
+///
+/// Security: labels and messages are fixed text; no value is printed.
+///
+/// ```
+/// use vault_cli::render;
+/// # fn show(invalid: &vault_core::session::InvalidSecret) {
+/// eprintln!("vault: {}", render::invalid_secret(invalid));
+/// // vault: secret not saved:
+/// //   tag 2: tags must differ by more than case
+/// # }
+/// ```
+#[must_use]
+pub fn invalid_secret(invalid: &InvalidSecret) -> String {
+    let mut out = String::from("secret not saved:");
+    for problem in invalid.problems() {
+        let _ = write!(out, "\n  {}: {problem}", problem_label(problem));
+    }
+    out
+}
+
+/// The field a problem is about, as the person entered it: `title`, `tags`, `tag 2`,
+/// `custom field 1 name`, ...
+///
+/// ```ignore
+/// assert_eq!(problem_label(&FieldProblem::CustomFieldValue(0)), "custom field 1 value");
+/// ```
+fn problem_label(problem: &FieldProblem) -> String {
+    let field = match problem.field() {
+        SecretField::Title => "title",
+        SecretField::Username => "username",
+        SecretField::Password => "password",
+        SecretField::Url => "URL",
+        SecretField::Notes => "notes",
+        SecretField::Tags => "tag",
+        SecretField::CustomFields => "custom field",
+    };
+    let Some(index) = problem.index() else {
+        return match problem.field() {
+            SecretField::Tags => "tags".to_owned(),
+            SecretField::CustomFields => "custom fields".to_owned(),
+            _ => field.to_owned(),
+        };
+    };
+    let part = match problem.part() {
+        Some(CustomFieldPart::Name) => " name",
+        Some(CustomFieldPart::Value) => " value",
+        None => "",
+    };
+    format!("{field} {}{part}", index + 1)
 }

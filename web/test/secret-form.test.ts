@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { editValues, emptyValues, parseTags, secretRequest } from "../src/secret-form.js";
+import { editValues, emptyValues, parseTags, placeFieldErrors, secretRequest } from "../src/secret-form.js";
 
 test("tags: comma-separated, trimmed, blanks dropped", () => {
   assert.deepEqual(parseTags(" work, code ,,  "), ["work", "code"]);
@@ -104,4 +104,46 @@ test("a stored secret without a password starts with an empty password, to be ge
   });
   assert.equal(values.passwordUnchanged, false);
   assert.equal(values.password, "");
+});
+
+test("each problem of a refused secret goes next to its input, row and part", () => {
+  const placed = placeFieldErrors(
+    [
+      { field: "title", message: "bad title" },
+      { field: "tags", index: 1, message: "tags must differ by more than case" },
+      { field: "tags", message: "too many tags" },
+      { field: "custom_fields", index: 0, part: "value", message: "bad value" },
+      { field: "custom_fields", index: 2, part: "name", message: "bad name" },
+      { field: "custom_fields", index: 2, part: "name", message: "duplicate name" },
+      { field: "custom_fields", message: "too many custom fields" },
+      { field: "mystery", message: "unknown field" },
+    ],
+    ["work", "WORK"],
+  );
+  assert.deepEqual(placed.fields, {
+    title: ["bad title"],
+    tags: ['Tag "WORK": tags must differ by more than case', "too many tags"],
+    custom_fields: ["too many custom fields"],
+  });
+  assert.deepEqual(placed.customFields, {
+    0: { name: [], value: ["bad value"] },
+    2: { name: ["bad name", "duplicate name"], value: [] },
+  });
+  assert.deepEqual(placed.general, ["unknown field"]);
+});
+
+test("a named tag is escaped, so a refused bidi override can't disguise the message", () => {
+  const placed = placeFieldErrors([{ field: "tags", index: 0, message: "bad tag" }], ["evil\u202etxt"]);
+  assert.deepEqual(placed.fields, { tags: ['Tag "evil\\u{202e}txt": bad tag'] });
+});
+
+test("a tag problem whose tag isn't in the request is named by its position", () => {
+  const placed = placeFieldErrors([{ field: "tags", index: 4, message: "bad tag" }], ["work"]);
+  assert.deepEqual(placed.fields, { tags: ["Tag 5: bad tag"] });
+});
+
+test("a custom field problem without a part goes on the custom fields line", () => {
+  const placed = placeFieldErrors([{ field: "custom_fields", index: 1, message: "odd" }], []);
+  assert.deepEqual(placed.fields, { custom_fields: ["Custom field 2: odd"] });
+  assert.deepEqual(placed.customFields, {});
 });
