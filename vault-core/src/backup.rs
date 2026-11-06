@@ -176,7 +176,9 @@ impl Destination {
 /// staged.commit()?;
 /// ```
 pub(crate) struct Staged {
+    /// The temp file in the destination's directory holding the copy until it is committed.
     temp: NamedTempFile,
+    /// Where the copy goes once it is read back and verified.
     dest: Destination,
 }
 

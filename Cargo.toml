@@ -10,6 +10,12 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# Every item has a docstring (CODING_STANDARDS.md). Clippy skips `#[test]`
+# functions, which are named as behaviour instead.
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+missing_docs_in_private_items = "warn"
 
 # Argon2 is unusably slow unoptimised; keep it fast in debug builds and tests.
 [profile.dev.package.argon2]

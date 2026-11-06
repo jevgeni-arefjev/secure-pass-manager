@@ -79,7 +79,9 @@ pub(crate) enum Echo {
 /// assert_eq!(input.into_text().as_str(), "a");
 /// ```
 pub(crate) struct MaskedInput {
+    /// What has been typed so far.
     text: Zeroizing<String>,
+    /// How many characters `text` holds, which is how many `*` are echoed.
     chars: usize,
 }
 

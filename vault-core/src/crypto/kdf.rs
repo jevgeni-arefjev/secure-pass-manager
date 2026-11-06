@@ -12,8 +12,11 @@ pub(crate) const KEY_LEN: usize = 32;
 /// one fixed set (ADR-0005), so there is nothing to bounds-check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct KdfParams {
+    /// Memory cost, in KiB.
     memory_kib: u32,
+    /// Time cost: passes over the memory.
     iterations: u32,
+    /// Degree of parallelism (lanes).
     parallelism: u32,
 }
 

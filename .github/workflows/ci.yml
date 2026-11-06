@@ -1,5 +1,5 @@
-# Builds and tests the workspace on macOS; type-checks, tests and builds the web
-# client before the release build, which embeds it. Cargo steps never need Node.
+# Runs the same checks (.github/actions/checks) on every supported platform: macOS,
+# Ubuntu, and Fedora in a container (GitHub has no Fedora runners).
 name: CI
 
 on:
@@ -14,32 +14,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  macos:
-    name: macOS
-    runs-on: macos-latest
+  host:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-latest
+          - name: Ubuntu
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Tests
-        run: cargo test --locked
-      - name: Slow tests (production KDF)
-        run: cargo test --locked -- --ignored
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Client (type-check, test, build)
-        working-directory: web
-        run: |
-          npm ci
-          npm run check
-          npm test
-          npm run build
-      - name: Release build
-        run: cargo build --locked --release
+      - uses: ./.github/actions/checks
+
+  fedora:
+    name: Fedora
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      # The image has no compiler; git lets checkout make a real clone, and tar, gzip
+      # and xz unpack the toolchain, Node and the caches.
+      - name: Build tools
+        run: dnf install -y gcc git tar gzip xz
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/checks

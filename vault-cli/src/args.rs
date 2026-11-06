@@ -33,6 +33,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub vault_dir: Option<PathBuf>,
 
+    /// The command to run.
     #[command(subcommand)]
     pub command: Command,
 }
@@ -93,6 +94,7 @@ pub struct Gen {
     after_help = "Quote titles with spaces: get \"my bank\""
 )]
 pub struct ShellLine {
+    /// The command typed at the `vault>` prompt.
     #[command(subcommand)]
     pub command: ShellCommand,
 }

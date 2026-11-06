@@ -67,8 +67,9 @@ const LOCK_FILE: &str = "secrets.lock";
 /// ([`StorageError::VaultFull`]), so a vault can never grow too large to open again.
 pub const MAX_VAULT_FILE_LEN: u64 = 64 * 1024 * 1024;
 
-/// Prefix and suffix of the temp files a write builds a vault in (`.<random>.tmp`).
+/// Prefix of the temp files a write builds a vault in (`.<random>.tmp`).
 const TEMP_PREFIX: &str = ".";
+/// Suffix of those temp files.
 const TEMP_SUFFIX: &str = ".tmp";
 
 /// How long a save waits for another session's save to finish before failing.
@@ -211,6 +212,7 @@ pub trait VaultStore {
 /// ```
 #[derive(Clone, Debug)]
 pub struct FileStore {
+    /// Vault directory holding one vault home per vaultname.
     dir: PathBuf,
 }
 

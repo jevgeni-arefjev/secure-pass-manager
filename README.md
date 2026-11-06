@@ -9,6 +9,22 @@ It is a password manager with one shared Rust core and two front ends:
 
 > **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s), and add, edit and delete secrets (an empty password is generated on the server; an edit keeps untouched hidden fields without the browser ever holding them; a refused save shows every invalid field at once). Sessions end server-side: a sweeper locks idle sessions and every session 8 h after unlock, SIGINT/SIGTERM lock every session before exit, a panicking request gets a generic 500 and its session is locked, and an open tab returns to the unlock page once its session has ended.
 
+## Roadmap
+
+Course deliverables:
+
+- [x] MVP with vault at rest, encryption module, storage module & CLI module.
+- [x] Build and run instructions that work on a clean machine.
+- [x] Basic working web interface with the core flows.
+- [x] Basic secure authentication (Argon2id-based unlock, no stored hash; see ADR-0002) and secure session management.
+- [x] Application served over TLS in the development setup.
+- [ ] Full input validation and sanitization on all fields.
+- [ ] Structured logging of key events and secure error handling.
+- [x] Per-user access control: a session can only open the vault it unlocked (ADR-0001).
+- [ ] Test cases written and passing, including input-validation edge cases and memory handling checks.
+- [ ] User manual for the CLI and the web app.
+- [ ] Reports: encryption methods, memory management, authentication and security features, how SQL injection, XSS and CSRF are prevented, and test results.
+
 ## Project layout
 
 ```
@@ -16,7 +32,9 @@ It is a password manager with one shared Rust core and two front ends:
 ├── Cargo.toml              # workspace root
 ├── Cargo.lock              # pinned dependency versions
 ├── CONTEXT.md              # domain glossary: vault, vaultname, secret, hidden field, unlock/lock
-├── .github/workflows/      # CI: clippy, tests, client check/test/build and release build on macOS
+├── CODING_STANDARDS.md     # judgement-call rules for writing and reviewing code (docstrings, where rules live, tests)
+├── .github/workflows/      # CI: the same checks on macOS, Ubuntu and Fedora (container)
+├── .github/actions/checks/ # those checks: fmt, clippy (docstrings required), tests, client lint/check/test/build, release build
 ├── docs/agents/            # notes for coding agents: issue tracker, triage labels, domain docs
 ├── docs/adr/               # architecture decision records
 ├── fixtures/               # unsafe-characters.json: unsafe characters and safe look-alikes, shared by the core, CLI and web client tests
@@ -84,7 +102,8 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── json.rs         # strict JSON bodies (64 KiB cap, objects only); master password straight into `MasterPassword`
 │       └── assets.rs       # embedded client bundle; "client not built" page
 └── web/                    # vanilla TypeScript browser client, bundled by esbuild into vault-web/assets
-    ├── package.json        # scripts: build, check, test; pinned dev tools in package-lock.json
+    ├── package.json        # scripts: build, lint, check, test; pinned dev tools in package-lock.json
+    ├── .oxlintrc.json      # lint rules: correctness and suspicious categories, no shadowed names
     ├── tsconfig.json       # strict type-checking of src/; tsconfig.test.json adds test/ and emits to .test-build/
     ├── scripts/build.mjs   # `npm run build`: esbuild bundle + static files into vault-web/assets
     ├── static/             # index.html and app.css (no inline scripts or styles)
@@ -216,19 +235,20 @@ Both front ends save through the same core rules (ADR-0013); a refused save list
 ```bash
 cargo test                          # all workspace tests
 cargo test -- --ignored             # slow tests: the production KDF (256 MiB Argon2id)
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo clippy --all-targets -- -D warnings   # also requires a docstring on every item in src/
+cargo fmt --all --check
 ```
 
 Client checks, from `web/` (need Node 22+):
 
 ```bash
-npm ci                              # install the pinned dev tools (esbuild, TypeScript)
+npm ci                              # install the pinned dev tools (esbuild, TypeScript, Oxlint)
+npm run lint                        # Oxlint over src/, test/ and scripts/ (e.g. no shadowed names)
 npm run check                       # tsc --noEmit over src/ and test/
 npm test                            # node:test tests of the pure helpers
 ```
 
-CI (`.github/workflows/ci.yml`) runs clippy, both test commands, the client checks and build, and a release build on macOS for every push to `main` and every pull request. The Rust steps never need Node. `tests/memory.rs` runs on Linux only.
+CI (`.github/workflows/ci.yml`) runs the same checks (`.github/actions/checks`) on macOS, Ubuntu and Fedora (in a `fedora:latest` container) for every push to `main` and every pull request: formatting, clippy, both test commands, the client lint, checks and build, and a release build. The Rust steps never need Node. `tests/memory.rs` runs on Linux only.
 
 Tests create vaults in a cheap test format (feature `insecure-test-kdf`, ADR-0005), which only test builds enable. Run tests in debug: `cargo test --release` is refused on purpose, so the test format can never end up in a release binary.
 

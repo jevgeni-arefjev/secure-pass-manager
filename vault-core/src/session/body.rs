@@ -19,7 +19,9 @@ const BODY_VERSION: u32 = 1;
 /// The body as written: borrows the session's secrets.
 #[derive(Serialize)]
 struct BodyRef<'a> {
+    /// Body layout version ([`BODY_VERSION`]).
     version: u32,
+    /// The session's secrets.
     secrets: &'a [Secret],
 }
 
@@ -27,7 +29,9 @@ struct BodyRef<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Body {
+    /// Body layout version; only [`BODY_VERSION`] is read.
     version: u32,
+    /// Every secret in the vault.
     secrets: Vec<Secret>,
 }
 

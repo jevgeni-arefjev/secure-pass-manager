@@ -167,8 +167,11 @@ pub trait TerminalHandle: Send + Sync {
 /// # Ok::<(), vault_cli::terminal::TerminalError>(())
 /// ```
 pub struct StdTerminal {
+    /// Line editor for visible lines, with the in-memory command history.
     editor: DefaultEditor,
+    /// The clipboard, cleared of our copy when the terminal is dropped.
     clipboard: Clipboard,
+    /// The handle given to background threads, made on first request.
     handle: Option<Arc<StdHandle>>,
 }
 
@@ -208,7 +211,9 @@ impl Drop for StdTerminal {
 /// [`TerminalHandle`] for [`StdTerminal`]: prints through rustyline's external printer
 /// (so the message appears above a waiting prompt), or to stderr if there is none.
 struct StdHandle {
+    /// rustyline's printer for messages above a waiting prompt; `None` if it has none.
     printer: Mutex<Option<Box<dyn ExternalPrinter + Send>>>,
+    /// The clipboard, so background threads can clear it.
     clipboard: Clipboard,
 }
 

@@ -633,8 +633,8 @@ function renderDetail(secret: SecretDetail, notice?: string): void {
   }
   vaultPage(...children, textElement("h2", displayText(secret.title, false)), actions, status, fields);
   onLeave(() => {
-    for (const field of hiddenFields) {
-      field.hide();
+    for (const revealed of hiddenFields) {
+      revealed.hide();
     }
   });
   back.focus();
@@ -642,7 +642,7 @@ function renderDetail(secret: SecretDetail, notice?: string): void {
 
 /**
  * A hidden field of the secret titled `title`: its mask with Reveal/Hide and Copy
- * buttons, and a status line. `field` is {@link PASSWORD_FIELD} or the custom field's name. The
+ * buttons, and a status line. `fieldName` is {@link PASSWORD_FIELD} or the custom field's name. The
  * field's {@link RevealedField} is added to `fields`, for masking when the page is left.
  *
  * Security: each Reveal and each Copy fetches the one value anew (an audited request);
@@ -652,7 +652,7 @@ function renderDetail(secret: SecretDetail, notice?: string): void {
  * @example
  * row("Password", hiddenValue("GitHub", PASSWORD_FIELD, hiddenFields));
  */
-function hiddenValue(title: string, field: string, fields: RevealedField[]): HTMLElement {
+function hiddenValue(title: string, fieldName: string, fields: RevealedField[]): HTMLElement {
   const value = masked();
   const toggle = button("Reveal", "button");
   const copy = button("Copy", "button");
@@ -686,7 +686,7 @@ function hiddenValue(title: string, field: string, fields: RevealedField[]): HTM
     buttonUsed.disabled = true;
     status.textContent = "";
     api
-      .revealField(title, field)
+      .revealField(title, fieldName)
       .then(async (revealed) => {
         if (generation === pageGeneration) {
           await use(revealed);
@@ -1055,8 +1055,8 @@ function showFieldProblems(
 ): void {
   const placed = placeFieldErrors(err.fields, tags);
   const leftOver = [...placed.general];
-  for (const [field, messages] of Object.entries(placed.fields)) {
-    const target = targets[field];
+  for (const [name, messages] of Object.entries(placed.fields)) {
+    const target = targets[name];
     if (target === undefined) {
       leftOver.push(...messages);
     } else {

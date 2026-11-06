@@ -33,8 +33,11 @@ use sessions::Sessions;
 /// Cloning is cheap; all clones share the same sessions.
 #[derive(Clone)]
 pub(crate) struct AppState {
+    /// The server's configuration.
     config: AppConfig,
+    /// The session registry.
     sessions: Arc<Sessions>,
+    /// Limits how many KDF runs happen at once.
     kdf: Arc<KdfLimiter>,
 }
 
@@ -89,6 +92,7 @@ pub(crate) struct SessionTag(String);
 /// ```
 #[derive(Clone)]
 pub struct App {
+    /// What every handler can reach.
     state: AppState,
 }
 

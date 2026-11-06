@@ -295,20 +295,29 @@ pub enum Saved {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct Session<S: VaultStore> {
+    /// Where the vault file is loaded from and saved to.
     store: S,
+    /// The vault this session unlocked; it can open no other.
     vaultname: Vaultname,
+    /// Idle timeout, clock and audit sink.
     config: SessionConfig,
     /// `None` once auto-locked or locked by a conflict.
     open: Option<OpenVault>,
+    /// When the session was last used, for auto-lock.
     last_used: Instant,
+    /// Whether the "hidden values are not in locked memory" warning was already given.
     warned_memory_unlocked: bool,
+    /// Whether the "audit log could not be written" warning was already given.
     warned_audit_failed: bool,
 }
 
 /// What an unlocked session holds.
 struct OpenVault {
+    /// The vault key, which decrypts the body.
     key: VaultKey,
+    /// The header of the vault file as last loaded or saved.
     header: Header,
+    /// Every secret in the vault, decrypted.
     secrets: Vec<Secret>,
 }
 

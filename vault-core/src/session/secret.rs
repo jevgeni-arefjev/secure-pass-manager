@@ -203,7 +203,9 @@ impl FieldValue {
 /// assert_eq!(field.name(), "recovery code");
 /// ```
 pub struct CustomField {
+    /// The name, as the person wrote it (normalised on save).
     name: Zeroizing<String>,
+    /// The value, plain or hidden.
     value: FieldValue,
 }
 
@@ -345,20 +347,29 @@ impl<'de> Deserialize<'de> for CustomField {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Secret {
+    /// The title that identifies this secret in its vault.
     title: Zeroizing<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The username, if set.
     username: Option<Zeroizing<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The password, if set; in locked memory.
     password: Option<HiddenValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The URL, if set.
     url: Option<Zeroizing<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The notes, if set; may span several lines.
     notes: Option<Zeroizing<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The tags, in the order they were added.
     tags: Vec<Zeroizing<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The custom fields, in the order they were added.
     custom_fields: Vec<CustomField>,
+    /// When the secret was first saved, in Unix seconds; 0 before that.
     created_at: u64,
+    /// When the secret was last saved, in Unix seconds; 0 before that.
     updated_at: u64,
 }
 

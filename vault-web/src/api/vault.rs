@@ -38,8 +38,11 @@ const IDLE_TIMEOUT_MINUTES: std::ops::RangeInclusive<u64> = 1..=60;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UnlockRequest {
+    /// The vaultname to create or unlock.
     vaultname: String,
+    /// The master password, read straight into locked memory.
     master_password: MasterPasswordField,
+    /// Idle timeout in minutes (1-60); absent means the default (5 minutes).
     #[serde(default)]
     idle_timeout_minutes: Option<u64>,
 }
@@ -48,8 +51,11 @@ pub(crate) struct UnlockRequest {
 /// is open and its idle timeout.
 #[derive(Serialize)]
 struct SessionInfo<'a> {
+    /// The token to send back in `X-CSRF-Token`.
     csrf_token: &'a str,
+    /// The vault this session opened.
     vaultname: &'a str,
+    /// The idle timeout in force, in minutes.
     idle_timeout_minutes: u64,
 }
 

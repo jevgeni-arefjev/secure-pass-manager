@@ -36,12 +36,14 @@ pub const CLEAR_AFTER: Duration = Duration::from_secs(20);
 /// ```
 #[derive(Clone, Default)]
 pub struct Clipboard {
+    /// Shared by every clone, so a clear from another thread sees the last copy.
     state: Arc<Mutex<State>>,
 }
 
 /// What we know about the clipboard.
 #[derive(Default)]
 struct State {
+    /// The system clipboard, opened on the first copy; `None` until then.
     board: Option<arboard::Clipboard>,
     /// Our last copy, until it is cleared or overwritten by someone else.
     copied: Option<HiddenValue>,

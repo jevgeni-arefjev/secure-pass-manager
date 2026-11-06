@@ -22,13 +22,18 @@
 use super::CryptoError;
 use super::kdf::{KEY_LEN, KdfParams};
 
+/// Magic bytes every vault file starts with.
 const MAGIC: &[u8; 4] = b"SPMV";
 /// Magic, format version, salt.
 const WRAP_AAD_LEN: usize = 4 + 2 + SALT_LEN;
 
+/// Length of the Argon2id salt, in bytes.
 pub(crate) const SALT_LEN: usize = 16;
+/// Length of an XChaCha20-Poly1305 nonce, in bytes.
 pub(crate) const NONCE_LEN: usize = 24;
+/// Length of a Poly1305 tag, in bytes.
 pub(crate) const TAG_LEN: usize = 16;
+/// Length of the wrapped vault key: the key and its tag.
 pub(crate) const WRAPPED_KEY_LEN: usize = KEY_LEN + TAG_LEN;
 
 /// The top bit of a format version marks a test format: the same layout as the
@@ -112,11 +117,17 @@ impl Format {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
+    /// Format version; it fixes the KDF params (ADR-0005).
     pub(crate) format: Format,
+    /// Argon2id salt for the KEK.
     pub(crate) salt: [u8; SALT_LEN],
+    /// Nonce of the vault-key wrap.
     pub(crate) wrap_nonce: [u8; NONCE_LEN],
+    /// The vault key encrypted under the KEK, with its tag.
     pub(crate) wrapped_key: [u8; WRAPPED_KEY_LEN],
+    /// Counter of changes to the vault.
     pub(crate) revision: u64,
+    /// Nonce of the encrypted body.
     pub(crate) body_nonce: [u8; NONCE_LEN],
 }
 

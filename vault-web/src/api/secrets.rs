@@ -27,6 +27,7 @@ use crate::json::StrictJson;
 /// The body of `GET /api/secrets`.
 #[derive(Serialize)]
 pub(crate) struct SecretList {
+    /// Every secret, sorted by title.
     secrets: Vec<SecretSummary>,
 }
 
@@ -36,12 +37,19 @@ pub(crate) struct SecretList {
 /// Security: holds no hidden value; the password is only flagged.
 #[derive(Serialize)]
 struct SecretFields {
+    /// The title.
     title: String,
+    /// The username, if set.
     username: Option<String>,
+    /// The URL, if set.
     url: Option<String>,
+    /// The tags, in order.
     tags: Vec<String>,
+    /// Whether there is a password; never its value.
     has_password: bool,
+    /// When the secret was first saved, in Unix seconds.
     created_at: u64,
+    /// When the secret was last saved, in Unix seconds.
     updated_at: u64,
 }
 
@@ -70,9 +78,12 @@ impl SecretFields {
 /// Security: holds no hidden value, no notes and no custom field value.
 #[derive(Serialize)]
 struct SecretSummary {
+    /// What identifies the secret.
     #[serde(flatten)]
     fields: SecretFields,
+    /// Whether there are notes; never their text.
     has_notes: bool,
+    /// The custom fields, by name only.
     custom_fields: Vec<FieldName>,
 }
 
@@ -94,7 +105,9 @@ impl SecretSummary {
 /// A custom field by name only, with whether it is hidden.
 #[derive(Serialize)]
 struct FieldName {
+    /// The field's name.
     name: String,
+    /// Whether the field is hidden.
     hidden: bool,
 }
 
@@ -119,9 +132,12 @@ impl FieldName {
 /// `"hidden": true` and no value); revealing them is a separate, audited request.
 #[derive(Serialize)]
 pub(crate) struct SecretDetail {
+    /// What identifies the secret.
     #[serde(flatten)]
     fields: SecretFields,
+    /// The notes, if set.
     notes: Option<String>,
+    /// The custom fields; hidden ones without their value.
     custom_fields: Vec<CustomFieldView>,
 }
 
@@ -148,8 +164,18 @@ impl SecretDetail {
 ///
 /// Serialized as `{"name", "hidden": false, "value"}` or `{"name", "hidden": true}`.
 enum CustomFieldView {
-    Plain { name: String, value: String },
-    Hidden { name: String },
+    /// A plain field, with its value.
+    Plain {
+        /// The field's name.
+        name: String,
+        /// The field's value.
+        value: String,
+    },
+    /// A hidden field, named only.
+    Hidden {
+        /// The field's name.
+        name: String,
+    },
 }
 
 impl CustomFieldView {
@@ -249,6 +275,7 @@ const PASSWORD_FIELD: &str = "password";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RevealRequest {
+    /// The field to reveal: `password` or a hidden custom field's name.
     field: String,
 }
 
@@ -258,13 +285,17 @@ pub(crate) struct RevealRequest {
 /// zeroizing copy of the value.
 #[derive(Serialize)]
 struct Revealed<'a> {
+    /// The revealed value.
     value: &'a str,
 }
 
 /// Why a reveal returned no value; failing the reveal closure records no audit event.
 enum RevealError {
+    /// The session refused (locked, no such secret, ...).
     Session(SessionError),
+    /// The secret has no field with that name.
     FieldNotFound,
+    /// The field is not hidden, so there is nothing to reveal.
     NotHidden,
 }
 

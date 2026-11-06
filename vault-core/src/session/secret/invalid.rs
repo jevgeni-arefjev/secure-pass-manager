@@ -214,6 +214,7 @@ impl fmt::Display for FieldProblem {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvalidSecret {
+    /// Every problem found, in field order; never empty.
     problems: Vec<FieldProblem>,
 }
 

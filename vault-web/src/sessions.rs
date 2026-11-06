@@ -255,11 +255,14 @@ impl WebSession {
 /// let sessions = Sessions::new(config.clock.clone(), config.session_lifetime);
 /// ```
 pub(crate) struct Sessions {
+    /// The open sessions, by the SHA-256 of their ID.
     map: Mutex<HashMap<SessionKey, Arc<WebSession>>>,
     /// Set by [`Sessions::lock_all`]; written and read only under the `map` lock, so
     /// no insert can slip in after it.
     stopping: AtomicBool,
+    /// Clock for idle and lifetime expiry.
     clock: Arc<dyn Clock>,
+    /// Longest a session lives after unlock, idle or not.
     lifetime: Duration,
 }
 

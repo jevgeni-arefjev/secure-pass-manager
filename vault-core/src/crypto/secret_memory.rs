@@ -54,10 +54,13 @@ use zeroize::Zeroize;
 /// best-effort: if it fails (e.g. `RLIMIT_MEMLOCK` reached) the buffer is still
 /// zeroized on drop, and [`LockedBytes::is_locked`] reports `false`.
 pub(crate) struct LockedBytes {
-    // Declared before `buf` so the pages are unlocked before they are freed.
+    /// The `mlock` guard; `None` if locking failed. Declared before `buf` so the pages are unlocked before they are freed.
     lock: Option<region::LockGuard>,
+    /// The allocation: the page-aligned window plus up to one page of slack before it.
     buf: Box<[u8]>,
+    /// Offset of the page-aligned window in `buf`.
     start: usize,
+    /// Length of the contents, in bytes, from `start`.
     len: usize,
 }
 

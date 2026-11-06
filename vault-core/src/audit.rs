@@ -242,6 +242,7 @@ pub trait AuditSink: Send + Sync {
 /// ```
 #[derive(Clone, Debug)]
 pub struct FileSink {
+    /// Vault directory holding each vault home, and so each `audit.log`.
     dir: PathBuf,
 }
 
@@ -400,6 +401,7 @@ fn io_error(_: io::Error) -> AuditError {
 /// ```
 #[derive(Debug, Default)]
 pub struct MemorySink {
+    /// Every event recorded so far, with the vault it belongs to, in order.
     records: Mutex<Vec<(Vaultname, Record)>>,
 }
 

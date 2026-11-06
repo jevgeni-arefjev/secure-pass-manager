@@ -98,7 +98,9 @@ pub(crate) fn is_state_changing(method: &Method) -> bool {
 /// async fn lock(current: CurrentSession) -> Response { .. }
 /// ```
 pub(crate) struct CurrentSession {
+    /// The session's registry key, the SHA-256 of its ID.
     key: SessionKey,
+    /// The session itself.
     session: Arc<WebSession>,
 }
 

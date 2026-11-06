@@ -31,8 +31,11 @@ use crate::{AppState, auth};
 /// ```
 #[derive(Clone, Debug)]
 pub(crate) struct ApiError {
+    /// The HTTP status.
     status: StatusCode,
+    /// The fixed message shown to the user.
     message: Cow<'static, str>,
+    /// The request field at fault, if one is.
     field: Option<&'static str>,
     /// Every problem of a refused secret; empty for any other error.
     fields: Vec<FieldError>,
@@ -46,11 +49,15 @@ pub(crate) struct ApiError {
 /// Security: the message is a `vault-core` rule; it never contains the value.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FieldError {
+    /// The request field (`title`, `tags`, `custom_fields`, ...).
     pub(crate) field: &'static str,
+    /// For a tag or custom field, its 0-based index.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) index: Option<usize>,
+    /// For a custom field, `"name"` or `"value"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) part: Option<&'static str>,
+    /// The rule that was broken.
     pub(crate) message: String,
 }
 
@@ -224,9 +231,12 @@ impl ApiError {
 /// The JSON body of an error response.
 #[derive(Serialize)]
 struct ErrorBody<'a> {
+    /// The message.
     error: &'a str,
+    /// The request field at fault, if one is.
     #[serde(skip_serializing_if = "Option::is_none")]
     field: Option<&'static str>,
+    /// Every problem of a refused secret.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     fields: &'a [FieldError],
 }

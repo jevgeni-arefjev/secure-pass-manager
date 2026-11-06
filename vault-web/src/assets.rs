@@ -30,6 +30,7 @@ const CLIENT_NOT_BUILT: &str = "<!doctype html>\n<html lang=\"en\">\n<head>\n\
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct Assets {
+    /// The files by request path, shared by every clone.
     files: Arc<HashMap<String, Bytes>>,
 }
 

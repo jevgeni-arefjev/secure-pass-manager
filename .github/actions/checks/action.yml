@@ -1,0 +1,42 @@
+# The checks every CI platform runs, after the repo is checked out: format, lints,
+# tests (fast and slow), the web client (lint, type-check, test, build) and the
+# release build, which embeds the client. Cargo steps never need Node.
+name: Checks
+description: Format, lint, test and build the workspace and the web client.
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    - uses: Swatinem/rust-cache@v2
+    - name: Format
+      shell: bash
+      run: cargo fmt --all --check
+    - name: Clippy
+      shell: bash
+      run: cargo clippy --locked --all-targets -- -D warnings
+    - name: Tests
+      shell: bash
+      run: cargo test --locked
+    - name: Slow tests (production KDF)
+      shell: bash
+      run: cargo test --locked -- --ignored
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+    - name: Client (lint, type-check, test, build)
+      shell: bash
+      working-directory: web
+      run: |
+        npm ci
+        npm run lint
+        npm run check
+        npm test
+        npm run build
+    - name: Release build
+      shell: bash
+      run: cargo build --locked --release

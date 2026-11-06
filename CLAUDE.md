@@ -6,8 +6,7 @@ Password manager for two TalTech courses in one repo (instructor-approved): one 
 - Instructor requirements: `course-project-requirements.md`
 - Layout, build/run: `README.md`
 
-Cargo workspace: `vault-core` (crypto, storage, audit, backup, user), `vault-cli` (binary `vault`). `vault-web` and `web/` come later.
-Toolchain lives in `~/.cargo/bin` (may not be on PATH).
+Cargo workspace: `vault-core` (crypto, storage, audit, backup, session), `vault-cli` (binary `vault`), `vault-web` (HTTPS server); `web/` is the TypeScript client it embeds.
 
 ## Decisions
 
@@ -17,8 +16,8 @@ Toolchain lives in `~/.cargo/bin` (may not be on PATH).
 - Core stays as modules in one crate, not separate crates.
 - Crypto: Argon2id (m=256 MiB, t=3, p=1) for the KEK, with KDF params fixed by the format version in the vault header (ADR-0005); XChaCha20-Poly1305 for both the vault-key wrap and the body; HKDF-SHA-256 for the body key. Do not change algorithms or params without asking.
 - CLI session is an interactive shell: `vault unlock` opens a `vault>` prompt and keys live only in that process, never on disk.
-- Secrets are entered only via hidden terminal prompts (e.g. `vault save <secret>` prompts for the password).
-- Supported platforms: Linux and macOS (CI runs on macOS, `.github/workflows/ci.yml`). No Windows support is planned: don't add Windows-specific code, docs or CI. Existing `cfg(unix)` code stays as it is.
+- Secrets are entered only via hidden terminal prompts (e.g. `vault save <secret>` prompts for the password), and never reach logs, command-line args, env vars or error messages.
+- Supported platforms: Linux and macOS (CI runs on macOS, Ubuntu and Fedora, `.github/workflows/ci.yml`). No Windows support is planned: don't add Windows-specific code, docs or CI. Existing `cfg(unix)` code stays as it is.
 - Web is a local demo only (no Vercel/serverless: design needs a long-lived process holding session keys).
 - Terminology (vault, vaultname, secret, hidden field, unlock/lock, ...) is defined in `CONTEXT.md`; use it in code and docs.
 
@@ -36,24 +35,13 @@ These are deliberate design choices that differ from `course-project-requirement
 
 - Do not modify `course-project-requirements.md`, `secure-password-manager.md`, `web-app-security.md` unless EXPLICITLY asked.
 - If requirements cause conflict, prefer ICS0022 course requirements.
-- No `unsafe` (forbidden workspace-wide). Secrets never in logs, args, env vars or error messages.
-- Create docstrings for every function that you write. Docstrings should be brief, but mention important points for security and have usage examples.
-- Always stick to the current coding best practices that result in readable, scalable and maintainable codebase. Never sacrifice long-term maintainability for faster development.
+- Coding standards (docstrings, where rules live, tests): `CODING_STANDARDS.md`.
 - Keep `README.md` layout and build instructions in sync with the code.
+- Roadmap: the course deliverables checklist is in `README.md` (Roadmap).
 
-## Timeline
+## Finishing work
 
-- [x] MVP with vault at rest, encryption module, storage module & CLI module. It should be working and usable code.
-- [x] Build and run instructions that work on a clean machine.
-- [x] Basic working web interface with the core flows.
-- [x] Basic secure authentication (Argon2id-based unlock, no stored hash; see Deviations) and secure session management.
-- [x] Application served over TLS in the development setup.
-- [ ] Full input validation and sanitization on all fields.
-- [ ] Structured logging of key events and secure error handling.
-- [x] Per-user access control: a session can only open the vault it unlocked (Session module; see Deviations).
-- [ ] Test cases written and passing, including input-validation edge cases and memory handling checks.
-- [ ] User manual for the CLI and the web app.
-- [ ] Reports: encryption methods, memory management, authentication and security features, how SQL injection, XSS and CSRF are prevented, and test results.
+Leave changes uncommitted for the user to review; this overrides skills that commit. End with whether the work is ready to commit (which checks ran and passed, what is still open) and a proposed message in the repo's style: one commit per issue, `<summary> (closes #N)`. Commit or branch only when the user asks.
 
 ## Agent skills
 
