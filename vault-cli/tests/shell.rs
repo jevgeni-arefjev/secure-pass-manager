@@ -615,42 +615,29 @@ fn ctrl_c_during_save_cancels_it_and_the_shell_goes_on() {
 }
 
 #[test]
-fn an_invalid_field_is_reported_and_nothing_is_saved() {
+fn every_whole_secret_problem_of_a_refused_save_is_printed() {
     let fx = Fixture::with_alice();
-    let mut script = vec![line("save x")];
-    script.extend(save_answers("alice", "s3cret!"));
-    script[2] = hidden(&"x".repeat(1025));
-    script.push(line("list"));
-    let (_, t) = fx.shell(script);
-    assert!(t.stderr().contains("password"), "{}", t.stderr());
-    assert!(t.stdout().contains("no secrets yet"));
-}
-
-#[test]
-fn every_invalid_field_of_a_refused_save_is_printed() {
-    let fx = Fixture::with_alice();
-    let script = vec![
+    let tags: Vec<String> = (1..=33).map(|i| format!("t{i}")).collect();
+    let mut script = vec![
         line("save x"),
         line("alice"),
-        hidden(&"x".repeat(1025)), // password
-        line(""),                  // URL
-        line(""),                  // notes
-        line("work, WORK"),        // tags
-        line("y"),                 // add a custom field
-        line("pin"),
-        line("n"), // not hidden
-        line(""),  // empty value
-        line("n"), // no more custom fields
-        line("list"),
+        hidden("s3cret!"),
+        line(""), // URL
+        line(""), // notes
+        line(&tags.join(",")),
     ];
+    for i in 1..=33 {
+        script.extend([line("y"), line(&format!("f{i}")), line("n"), line("v")]);
+    }
+    script.extend([line("n"), line("list")]);
     let (exit, t) = fx.shell(script);
     assert_eq!(exit, Exit::Success);
-    let expected = "vault: secret not saved:\n\
-        \x20 password: password must be 1-1024 characters, without control characters\n\
-        \x20 tag 2: tags must be unique, ignoring case\n\
-        \x20 custom field 1 value: custom field values must be 1-1024 characters, without control or formatting characters (hidden: 1-1024, without control characters)";
-    assert!(t.stderr().contains(expected), "{}", t.stderr());
-    assert!(!t.stderr().contains("xxxx"));
+    assert_eq!(
+        t.stderr(),
+        "vault: secret not saved:\n\
+        \x20 tags: a secret can have at most 32 tags\n\
+        \x20 custom fields: a secret can have at most 32 custom fields"
+    );
     assert!(t.stdout().contains("no secrets yet"));
 }
 
@@ -697,6 +684,170 @@ fn a_full_vault_refuses_a_save_and_the_shell_goes_on() {
         t.stderr()
     );
     assert_eq!(t.out.last().unwrap(), "vault locked");
+}
+
+#[test]
+fn an_invalid_title_is_refused_before_any_field_prompt() {
+    let fx = Fixture::with_alice();
+    let title = "x".repeat(65);
+    let script = vec![line(&format!("save {title}")), line("list")];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    assert_eq!(
+        t.stderr(),
+        "vault: secret not saved:\n  title: title must be 1-64 characters, without control or formatting characters"
+    );
+    assert_eq!(t.hidden_prompts, ["Master password: "]);
+    assert!(t.stdout().contains("no secrets yet"));
+}
+
+#[test]
+fn an_invalid_answer_is_asked_again_with_the_reason() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("save github"),
+        line("al\u{1b}ice"), // username: refused
+        line("alice"),
+        hidden("bell\u{7}"), // password: refused
+        hidden("s3cret!"),
+        line("ftp://github.com"), // URL: refused
+        line("github.com"),
+        line(""),  // notes
+        line(""),  // tags
+        line("n"), // no custom field
+        line("get github --show"),
+    ];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    assert_eq!(
+        t.err,
+        [
+            "vault: username: username must be 1-256 characters, without control or formatting characters",
+            "vault: password: password must be 1-1024 characters, without control characters",
+            "vault: URL: URL must be an http:// or https:// address with a host, or a bare host such as github.com; keep other addresses in notes or a custom field",
+        ]
+    );
+    assert_eq!(
+        t.hidden_prompts,
+        [
+            "Master password: ",
+            "Password (empty to generate): ",
+            "Password (empty to generate): "
+        ]
+    );
+    assert!(
+        !t.stderr().contains("bell"),
+        "a refused value is never echoed"
+    );
+    assert_eq!(t.out.iter().filter(|o| *o == "secret added").count(), 1);
+    let view = t.out.iter().find(|o| o.starts_with("title:")).unwrap();
+    assert!(view.contains("username: alice"), "{view}");
+    assert!(view.contains("password: s3cret!"), "{view}");
+    assert!(view.contains("url:      github.com"), "{view}");
+}
+
+#[test]
+fn a_duplicate_tag_or_custom_field_name_is_caught_when_entered() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("save github"),
+        line("alice"),
+        hidden("s3cret!"),
+        line(""),
+        line(""),
+        line("work, dev, WORK"), // tags: refused, the third repeats the first
+        line("work, dev"),
+        line("y"),
+        line("pin"),
+        line("y"),
+        hidden("1234"),
+        line("y"),
+        line("PIN"),      // repeats the first custom field
+        line("username"), // a standard field name
+        line("region"),
+        line("n"),
+        line("eu"),
+        line("n"),
+        line("get github"),
+    ];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    assert_eq!(
+        t.err,
+        [
+            "vault: tag 3: tags must be unique, ignoring case",
+            "vault: custom field 2 name: custom field names must be unique and differ from the standard fields",
+            "vault: custom field 2 name: custom field names must be unique and differ from the standard fields",
+        ]
+    );
+    let view = t.out.iter().find(|o| o.starts_with("title:")).unwrap();
+    assert!(view.contains("tags:     work, dev"), "{view}");
+    assert!(view.contains("pin:      *"), "{view}");
+    assert!(view.contains("region:   eu"), "{view}");
+}
+
+#[test]
+fn an_empty_custom_field_value_is_asked_again_hidden_or_not() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("save github"),
+        line(""), // username: not set
+        hidden("s3cret!"),
+        line(""), // URL: not set
+        line(""), // notes: not set
+        line(""), // tags: none
+        line("y"),
+        line("pin"),
+        line("y"),
+        hidden(""), // empty hidden value: refused
+        hidden("1234"),
+        line("y"),
+        line("region"),
+        line("n"),
+        line("   "), // empty value: refused
+        line("eu"),
+        line("n"),
+        line("get github"),
+    ];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    let reason = "custom field values must be 1-1024 characters, without control or formatting characters (hidden: 1-1024, without control characters)";
+    assert_eq!(
+        t.err,
+        [
+            format!("vault: custom field 1 value: {reason}"),
+            format!("vault: custom field 2 value: {reason}"),
+        ]
+    );
+    assert_eq!(
+        t.hidden_prompts,
+        [
+            "Master password: ",
+            "Password (empty to generate): ",
+            "Value: ",
+            "Value: "
+        ]
+    );
+    let view = t.out.iter().find(|o| o.starts_with("title:")).unwrap();
+    assert!(!view.contains("username"), "{view}");
+    assert!(!view.contains("url"), "{view}");
+    assert!(view.contains("region:   eu"), "{view}");
+}
+
+#[test]
+fn ctrl_c_at_a_re_asked_prompt_cancels_the_save() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("save github"),
+        line("alice"),
+        hidden("bell\u{7}"), // refused
+        Input::Interrupt,
+        line("list"),
+    ];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    assert_eq!(t.err.last().unwrap(), "vault: cancelled");
+    assert!(t.stdout().contains("no secrets yet"));
 }
 
 #[test]

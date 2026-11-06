@@ -364,11 +364,53 @@ fn pad(out: &mut String, n: usize) {
 /// ```
 #[must_use]
 pub fn invalid_secret(invalid: &InvalidSecret) -> String {
+    refused(invalid.problems())
+}
+
+/// A save refused for one field given with the command (the title of `save`), in the
+/// same form as [`invalid_secret`].
+///
+/// Security: the label and message are fixed text; no value is printed.
+///
+/// ```
+/// use vault_cli::render;
+/// use vault_core::session::FieldProblem;
+/// assert!(render::refused_field(&FieldProblem::Title).starts_with("secret not saved:\n  title: "));
+/// ```
+#[must_use]
+pub fn refused_field(problem: &FieldProblem) -> String {
+    refused(std::slice::from_ref(problem))
+}
+
+/// The heading of a refused save and one `<field>: <rule>` line per problem.
+///
+/// ```ignore
+/// refused(invalid.problems())
+/// ```
+fn refused(problems: &[FieldProblem]) -> String {
     let mut out = String::from("secret not saved:");
-    for problem in invalid.problems() {
-        let _ = write!(out, "\n  {}: {problem}", problem_label(problem));
+    for problem in problems {
+        let _ = write!(out, "\n  {}", field_problem(problem));
     }
     out
+}
+
+/// One problem as `<field>: <rule>`, naming the field as the person entered it (tags
+/// and custom fields numbered from 1); the vault shell prints it before asking again.
+///
+/// Security: the label and message are fixed text; no value is printed.
+///
+/// ```
+/// use vault_cli::render;
+/// use vault_core::session::FieldProblem;
+/// assert_eq!(
+///     render::field_problem(&FieldProblem::DuplicateTag(2)),
+///     "tag 3: tags must be unique, ignoring case"
+/// );
+/// ```
+#[must_use]
+pub fn field_problem(problem: &FieldProblem) -> String {
+    format!("{}: {problem}", problem_label(problem))
 }
 
 /// The field a problem is about, as the person entered it: `title`, `tags`, `tag 2`,

@@ -115,10 +115,39 @@ fn normalize(field: &mut Zeroizing<String>, trim: bool) {
     if text.len() == field.len() && is_nfc(text) {
         return;
     }
+    *field = nfc_copy(text);
+}
+
+/// Runs `f` on `text` in the form a save stores it (trimmed if `trim`, then
+/// NFC-normalised), without changing `text`. Text already in that form is borrowed, not
+/// copied.
+///
+/// Security: a copy, when one is needed, is zeroized once `f` returns.
+///
+/// ```ignore
+/// let valid = in_stored_form(" Cafe\u{301}", true, |title| is_valid(title, 64, TextKind::SingleLine));
+/// ```
+pub(super) fn in_stored_form<R>(text: &str, trim: bool, f: impl FnOnce(&str) -> R) -> R {
+    let text = if trim { text.trim() } else { text };
+    if is_nfc(text) {
+        return f(text);
+    }
+    f(&nfc_copy(text))
+}
+
+/// `text` NFC-normalised into a new zeroizing string.
+///
+/// Security: the buffer is sized exactly up front (one pass measures, a second writes),
+/// so no unzeroized copy is left behind by a reallocation.
+///
+/// ```ignore
+/// assert_eq!(nfc_copy("cafe\u{301}").as_str(), "caf\u{e9}");
+/// ```
+fn nfc_copy(text: &str) -> Zeroizing<String> {
     let len = text.nfc().map(char::len_utf8).sum();
     let mut out = Zeroizing::new(String::with_capacity(len));
     out.extend(text.nfc());
-    *field = out;
+    out
 }
 
 /// `text` as compared for lookups and duplicates: trimmed, NFC-normalised and lowercased,

@@ -4,7 +4,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { editValues, emptyValues, parseTags, placeFieldErrors, secretRequest } from "../src/secret-form.js";
+import {
+  editValues,
+  emptyCustomFieldValues,
+  emptyValues,
+  parseTags,
+  placeFieldErrors,
+  secretRequest,
+} from "../src/secret-form.js";
 
 test("tags: comma-separated, trimmed, blanks dropped", () => {
   assert.deepEqual(parseTags(" work, code ,,  "), ["work", "code"]);
@@ -146,4 +153,20 @@ test("a custom field problem without a part goes on the custom fields line", () 
   const placed = placeFieldErrors([{ field: "custom_fields", index: 1, message: "odd" }], []);
   assert.deepEqual(placed.fields, { custom_fields: ["Custom field 2: odd"] });
   assert.deepEqual(placed.customFields, {});
+});
+
+test("an empty custom field value is marked on its row, hidden or not", () => {
+  const fields = [
+    { name: "region", hidden: false, value: "eu-west-1", unchanged: false },
+    { name: "branch", hidden: false, value: "  ", unchanged: false },
+    { name: "pin", hidden: true, value: "", unchanged: false },
+    { name: "seed", hidden: true, value: "  ", unchanged: false }, // hidden values keep spaces
+    { name: "code", hidden: true, value: "", unchanged: true }, // kept as stored
+  ];
+  const message = "enter a value, or remove this field";
+  assert.deepEqual(emptyCustomFieldValues(fields), {
+    1: { name: [], value: [message] },
+    2: { name: [], value: [message] },
+  });
+  assert.deepEqual(emptyCustomFieldValues([]), {});
 });

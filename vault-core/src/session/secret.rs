@@ -15,14 +15,13 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::LockedBytes;
 
+pub mod check;
 mod invalid;
 mod text;
 mod url;
 
 pub use invalid::{CustomFieldPart, FieldProblem, InvalidSecret, SecretField};
 pub use text::is_unsafe_char;
-
-use text::TextKind;
 
 /// Longest title, in characters.
 const MAX_TITLE: usize = 64;
@@ -209,6 +208,22 @@ pub struct CustomField {
 }
 
 impl CustomField {
+    /// A custom field with a value that is plain or hidden, e.g. one already checked
+    /// with [`check::custom_field_value`].
+    ///
+    /// ```
+    /// # use vault_core::session::{CustomField, FieldValue, HiddenValue};
+    /// let value = FieldValue::Hidden(HiddenValue::new("1234".into()));
+    /// assert!(CustomField::new("pin", value).value().is_hidden());
+    /// ```
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: FieldValue) -> Self {
+        Self {
+            name: Zeroizing::new(name.into()),
+            value,
+        }
+    }
+
     /// A custom field shown normally.
     ///
     /// ```
@@ -218,10 +233,7 @@ impl CustomField {
     /// ```
     #[must_use]
     pub fn plain(name: impl Into<String>, value: impl Into<String>) -> Self {
-        Self {
-            name: Zeroizing::new(name.into()),
-            value: FieldValue::Plain(Zeroizing::new(value.into())),
-        }
+        Self::new(name, FieldValue::Plain(Zeroizing::new(value.into())))
     }
 
     /// A hidden custom field.
@@ -233,10 +245,7 @@ impl CustomField {
     /// ```
     #[must_use]
     pub fn hidden(name: impl Into<String>, value: HiddenValue) -> Self {
-        Self {
-            name: Zeroizing::new(name.into()),
-            value: FieldValue::Hidden(value),
-        }
+        Self::new(name, FieldValue::Hidden(value))
     }
 
     /// The field's name, as the person wrote it.
@@ -606,6 +615,9 @@ impl Secret {
     /// NFC-normalised) and checks every field against the rules on [`FieldProblem`], collecting
     /// every problem rather than stopping at the first. Hidden fields are left as
     /// entered.
+    /// Each field goes through its [`check`] function, the same one a front end uses to
+    /// check an answer as it is entered; the tag and custom field counts are checked
+    /// only here.
     ///
     /// Security: this is where control, format and separator characters are refused
     /// (hidden fields: control characters only), so nothing saved can drive a terminal
@@ -617,42 +629,16 @@ impl Secret {
     /// ```
     pub(super) fn validate(&mut self) -> Result<(), InvalidSecret> {
         self.normalize();
-        let broken = |text: Option<&str>, max: usize, kind: TextKind, problem| {
-            text.is_some_and(|text| !text::is_valid(text, max, kind))
-                .then_some(problem)
+        let optional = |text: Option<&str>, rule: fn(&str) -> Result<(), FieldProblem>| {
+            text.and_then(|text| rule(text).err())
         };
-        let url = self.url.as_deref().map(String::as_str);
-        let url_problem =
-            broken(url, MAX_URL, TextKind::SingleLine, FieldProblem::Url).or_else(|| {
-                url.is_some_and(|url| !url::is_supported(url))
-                    .then_some(FieldProblem::UnsupportedUrl)
-            });
         let mut problems: Vec<FieldProblem> = [
-            broken(
-                Some(&self.title),
-                MAX_TITLE,
-                TextKind::SingleLine,
-                FieldProblem::Title,
-            ),
-            broken(
-                self.username.as_deref().map(String::as_str),
-                MAX_USERNAME,
-                TextKind::SingleLine,
-                FieldProblem::Username,
-            ),
-            broken(
-                self.password.as_ref().map(HiddenValue::reveal),
-                MAX_HIDDEN,
-                TextKind::Hidden,
-                FieldProblem::Password,
-            ),
-            url_problem,
-            broken(
-                self.notes.as_deref().map(String::as_str),
-                MAX_NOTES,
-                TextKind::Notes,
-                FieldProblem::Notes,
-            ),
+            check::title(&self.title).err(),
+            optional(self.username(), check::username),
+            self.password()
+                .and_then(|password| check::password(password).err()),
+            optional(self.url(), check::url),
+            optional(self.notes(), check::notes),
         ]
         .into_iter()
         .flatten()
@@ -697,14 +683,7 @@ impl Secret {
             problems.push(FieldProblem::TooManyTags);
         }
         for (i, tag) in self.tags.iter().enumerate() {
-            if !text::is_valid(tag, MAX_TAG, TextKind::SingleLine) {
-                problems.push(FieldProblem::Tag(i));
-            } else if self.tags[..i]
-                .iter()
-                .any(|seen| text::same_folded(seen, tag))
-            {
-                problems.push(FieldProblem::DuplicateTag(i));
-            }
+            problems.extend(check::tag(tag, &self.tags[..i]).err());
         }
     }
 
@@ -720,24 +699,9 @@ impl Secret {
             problems.push(FieldProblem::TooManyCustomFields);
         }
         for (i, field) in self.custom_fields.iter().enumerate() {
-            if !text::is_valid(&field.name, MAX_FIELD_NAME, TextKind::SingleLine) {
-                problems.push(FieldProblem::CustomFieldName(i));
-            } else if STANDARD_FIELD_NAMES
-                .iter()
-                .any(|standard| text::same_folded(standard, &field.name))
-                || self.custom_fields[..i]
-                    .iter()
-                    .any(|seen| text::same_folded(&seen.name, &field.name))
-            {
-                problems.push(FieldProblem::DuplicateCustomFieldName(i));
-            }
-            let (value, max, kind) = match &field.value {
-                FieldValue::Plain(text) => (text.as_str(), MAX_FIELD_VALUE, TextKind::SingleLine),
-                FieldValue::Hidden(hidden) => (hidden.reveal(), MAX_HIDDEN, TextKind::Hidden),
-            };
-            if !text::is_valid(value, max, kind) {
-                problems.push(FieldProblem::CustomFieldValue(i));
-            }
+            problems.extend(check::custom_field_name(&field.name, &self.custom_fields[..i]).err());
+            problems
+                .extend(check::custom_field_value(&field.value, &self.custom_fields[..i]).err());
         }
     }
 }

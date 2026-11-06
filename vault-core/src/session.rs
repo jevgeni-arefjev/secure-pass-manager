@@ -66,7 +66,7 @@ pub use master_password_policy::{
 };
 pub use secret::{
     CustomField, CustomFieldPart, FieldProblem, FieldValue, HiddenValue, InvalidSecret, Secret,
-    SecretField, is_unsafe_char,
+    SecretField, check, is_unsafe_char,
 };
 
 /// Idle time after which a session locks itself, unless configured otherwise.

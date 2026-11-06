@@ -31,6 +31,7 @@ import {
   type CustomFieldValues,
   editValues,
   emptyCustomField,
+  emptyCustomFieldValues,
   emptyValues,
   placeFieldErrors,
   secretRequest,
@@ -982,6 +983,14 @@ function showSecretForm(stored: SecretDetail | null): void {
     for (const row of rows) {
       row.clearErrors();
     }
+    const customFields = rows.map((row) => row.values());
+    const emptyRows = emptyCustomFieldValues(customFields);
+    if (Object.keys(emptyRows).length > 0) {
+      for (const [index, errors] of Object.entries(emptyRows)) {
+        rows[Number(index)]?.showErrors(errors);
+      }
+      return;
+    }
     const request = secretRequest({
       title: stored?.title ?? title.input.value,
       username: username.input.value,
@@ -990,7 +999,7 @@ function showSecretForm(stored: SecretDetail | null): void {
       url: url.input.value,
       notes: notes.input.value,
       tags: tags.input.value,
-      customFields: rows.map((row) => row.values()),
+      customFields,
     });
     // Problems name rows by their index in this request, so keep the rows as sent.
     const sentRows = [...rows];

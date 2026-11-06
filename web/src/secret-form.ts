@@ -192,3 +192,29 @@ export function placeFieldErrors(problems: readonly FieldProblem[], tags: readon
   }
   return placed;
 }
+
+/** What an empty custom field value says on its row. */
+const EMPTY_VALUE = "enter a value, or remove this field";
+
+/**
+ * The custom field rows whose value is empty, by row index, so the form can mark them
+ * before sending (the server refuses them too). A plain value counts as empty once
+ * trimmed, as the server trims it; a hidden value only if it has no characters at
+ * all, since it is kept exactly as typed. A hidden value kept as stored is never
+ * empty. Leaving an optional standard field empty is not checked here: it means "not
+ * set".
+ *
+ * @example
+ * const empty = emptyCustomFieldValues(rows.map((row) => row.values()));
+ * if (Object.keys(empty).length > 0) { showOnRows(empty); return; }
+ */
+export function emptyCustomFieldValues(fields: readonly CustomFieldValues[]): Record<number, CustomFieldErrors> {
+  const marked: Record<number, CustomFieldErrors> = {};
+  fields.forEach((field, index) => {
+    const empty = field.hidden ? !field.unchanged && field.value === "" : field.value.trim() === "";
+    if (empty) {
+      marked[index] = { name: [], value: [EMPTY_VALUE] };
+    }
+  });
+  return marked;
+}

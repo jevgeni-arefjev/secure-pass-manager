@@ -25,6 +25,7 @@ It is a password manager with one shared Rust core and two front ends:
 │   ├── tests/storage.rs    # storage module behaviour, through its public API: one size limit for load and save
 │   ├── tests/session.rs    # session module behaviour, through its public API
 │   ├── tests/text_rules.rs # field text rules through Session: unsafe characters (shared fixture), limits in characters, trimming and NFC, title matching, URL forms, stored secrets breaking the rules
+│   ├── tests/field_checks.rs # per-field checks (`session::check`): each field on its own, normalised as a save would
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
 │   ├── tests/backup.rs     # backup destinations and Session::backup, through the public API
 │   ├── tests/generator.rs  # password generator behaviour, through its public API
@@ -39,7 +40,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── audit.rs        # Audit log: typed events as JSON Lines in `audit.log` per vault home, at most a title, rotated at 1 MiB, fail-open (ADR-0010)
 │       ├── backup.rs       # Backup: ciphertext-only copy of a vault file to a new file outside the vault directory, verified, never overwriting
 │       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once, records audit events (single user in MVP)
-│       └── session/        # secret model + field validation (every problem reported at once; text rules: unsafe characters, trimming, NFC, URL forms), JSON body, master password policy, clock
+│       └── session/        # secret model + field validation (per-field checks in `check`, used by saves and by the vault shell as each answer is typed; every problem of a save reported at once; text rules: unsafe characters, trimming, NFC, URL forms), JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   ├── tests/args.rs       # command grammar and help text, through its public API
 │   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping against the shared fixture), through its public API
@@ -191,6 +192,9 @@ All commands are listed in [`secure-password-manager.md` §5](secure-password-ma
 ### Secret fields
 
 Both front ends save through the same core rules (ADR-0013); a refused save lists every invalid field at once.
+
+- The vault shell checks `save`'s title before asking for any field, then checks each answer as it is given: a refused answer is asked again with the reason (never the value), until it is valid or Ctrl-C cancels the save. Tags and custom field names are checked against those entered before them. How many tags and custom fields a secret has is checked on save.
+- An empty custom field value, hidden or not, is refused: the vault shell asks for it again, and the web form marks it on its row without sending. Leaving the username, URL, notes or tags empty means "not set".
 
 | Field | Accepts |
 | --- | --- |

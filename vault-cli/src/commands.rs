@@ -23,9 +23,11 @@ use vault_core::backup::Destination;
 use vault_core::crypto::MasterPassword;
 use vault_core::generator::{self, DEFAULT_PASSWORD_LENGTH, GeneratorError};
 use vault_core::session::{
-    CustomField, HiddenValue, Saved, Secret, Session, SessionError, check_master_password,
+    CustomField, FieldProblem, FieldValue, HiddenValue, Saved, Secret, Session, SessionError,
+    check, check_master_password,
 };
 use vault_core::storage::FileStore;
+use zeroize::Zeroizing;
 
 use crate::args::ShellCommand;
 use crate::clipboard::CLEAR_AFTER;
@@ -54,6 +56,8 @@ pub(crate) enum Flow {
 pub(crate) enum CommandError {
     /// The session refused (wrong title, locked, invalid field, ...).
     Session(SessionError),
+    /// A field given with the command (the title of `save`) breaks a rule.
+    InvalidField(FieldProblem),
     /// The terminal gave no input (cancelled, closed) or failed.
     Terminal(TerminalError),
     /// No password could be generated.
@@ -93,6 +97,7 @@ impl fmt::Display for CommandError {
                 f.write_str(&render::invalid_secret(invalid))
             }
             Self::Session(err) => err.fmt(f),
+            Self::InvalidField(problem) => f.write_str(&render::refused_field(problem)),
             Self::Terminal(err) => err.fmt(f),
             Self::Generator(err) => err.fmt(f),
             Self::NotATerminal => {
@@ -232,8 +237,14 @@ fn get(
     Ok(())
 }
 
-/// `save`: asks for each field, then adds the secret, or replaces the one with this
-/// title after confirming. An empty password is generated.
+/// `save`: checks the title, then asks for each field, re-asking an answer until it
+/// passes the core's per-field checks ([`check`]); then adds the secret, or replaces
+/// the one with this title after confirming. An empty password is generated; an empty
+/// optional standard field (username, URL, notes, tags) is left unset. Ctrl-C at any
+/// prompt cancels the save and nothing is written.
+///
+/// Security: hidden answers are only read through hidden prompts, and a refused answer
+/// is reported by its rule ([`render::field_problem`]), never echoed.
 ///
 /// ```ignore
 /// save(terminal, session, "github".into())?;
@@ -243,6 +254,7 @@ fn save(
     session: &SharedSession,
     title: String,
 ) -> Result<(), CommandError> {
+    check::title(&title).map_err(CommandError::InvalidField)?;
     let exists = with_session(session, |session| Ok(session.contains(&title)?))?;
     if exists {
         let question = format!(
@@ -255,41 +267,26 @@ fn save(
         }
     }
     let mut secret = Secret::new(title);
-    if let Some(username) = optional_line(terminal, "Username (optional): ")? {
+    if let Some(username) = checked_line(terminal, "Username (optional): ", check::username)? {
         secret = secret.with_username(username);
     }
-    let mut typed = terminal.read_hidden("Password (empty to generate): ")?;
-    let generated = typed.is_empty();
-    let password = if generated {
-        generator::generate_password(DEFAULT_PASSWORD_LENGTH)?
-    } else {
-        HiddenValue::new(std::mem::take(&mut *typed))
+    let typed = ask_password(terminal)?;
+    let generated = typed.is_none();
+    let password = match typed {
+        Some(password) => password,
+        None => generator::generate_password(DEFAULT_PASSWORD_LENGTH)?,
     };
     secret = secret.with_password(password);
-    if let Some(url) = optional_line(terminal, "URL (optional): ")? {
+    if let Some(url) = checked_line(terminal, "URL (optional): ", check::url)? {
         secret = secret.with_url(url);
     }
-    if let Some(notes) = optional_line(terminal, "Notes (optional): ")? {
+    if let Some(notes) = checked_line(terminal, "Notes (optional): ", check::notes)? {
         secret = secret.with_notes(notes);
     }
-    if let Some(tags) = optional_line(terminal, "Tags (comma-separated, optional): ")? {
-        for tag in tags.split(',').map(str::trim).filter(|tag| !tag.is_empty()) {
-            secret = secret.with_tag(tag);
-        }
+    for tag in ask_tags(terminal)? {
+        secret = secret.with_tag(tag);
     }
-    while confirm(terminal, "Add a custom field?")? {
-        let Some(name) = optional_line(terminal, "Field name: ")? else {
-            break;
-        };
-        let field = if confirm(terminal, "Hidden?")? {
-            let mut value = terminal.read_hidden("Value: ")?;
-            CustomField::hidden(name, HiddenValue::new(std::mem::take(&mut *value)))
-        } else {
-            CustomField::plain(
-                name,
-                optional_line(terminal, "Value: ")?.unwrap_or_default(),
-            )
-        };
+    for field in ask_custom_fields(terminal)? {
         secret = secret.with_custom_field(field);
     }
 
@@ -304,6 +301,165 @@ fn save(
         Saved::Replaced => "secret replaced",
     });
     Ok(())
+}
+
+/// Asks with `ask` until `find_problems` finds nothing wrong with the answer, printing each
+/// problem (`vault: <field>: <rule>`) before asking again. A terminal error (Ctrl-C,
+/// end of input) ends the loop.
+///
+/// Security: only the rule is printed, never the refused answer.
+///
+/// ```ignore
+/// let url = ask_until_valid(
+///     terminal,
+///     |terminal| Ok(optional_line(terminal, "URL (optional): ")?),
+///     |url| if_given(url.as_deref(), check::url),
+/// )?;
+/// ```
+fn ask_until_valid<T>(
+    terminal: &mut dyn Terminal,
+    mut ask: impl FnMut(&mut dyn Terminal) -> Result<T, CommandError>,
+    find_problems: impl Fn(&T) -> Vec<FieldProblem>,
+) -> Result<T, CommandError> {
+    loop {
+        let answer = ask(terminal)?;
+        let found = find_problems(&answer);
+        if found.is_empty() {
+            return Ok(answer);
+        }
+        for problem in &found {
+            terminal.print_error(&format!("vault: {}", render::field_problem(problem)));
+        }
+    }
+}
+
+/// Asks for an optional visible field until it is left empty (`None`) or passes
+/// `check`.
+///
+/// ```ignore
+/// let url = checked_line(terminal, "URL (optional): ", check::url)?;
+/// ```
+fn checked_line(
+    terminal: &mut dyn Terminal,
+    prompt: &str,
+    check: fn(&str) -> Result<(), FieldProblem>,
+) -> Result<Option<String>, CommandError> {
+    ask_until_valid(
+        terminal,
+        |terminal| Ok(optional_line(terminal, prompt)?),
+        |answer| if_given(answer.as_deref(), check),
+    )
+}
+
+/// Asks for the password through a hidden prompt until it is left empty (`None`: to be
+/// generated) or passes [`check::password`].
+///
+/// ```ignore
+/// let typed = ask_password(terminal)?;
+/// ```
+fn ask_password(terminal: &mut dyn Terminal) -> Result<Option<HiddenValue>, CommandError> {
+    ask_until_valid(
+        terminal,
+        |terminal| {
+            let mut typed = terminal.read_hidden("Password (empty to generate): ")?;
+            Ok((!typed.is_empty()).then(|| HiddenValue::new(std::mem::take(&mut *typed))))
+        },
+        |typed| if_given(typed.as_ref(), check::password),
+    )
+}
+
+/// Asks for the comma-separated tags until every one passes [`check::tag`] against the
+/// tags before it on the line. Blank entries are dropped; an empty line means no tags.
+///
+/// ```ignore
+/// for tag in ask_tags(terminal)? { secret = secret.with_tag(tag); }
+/// ```
+fn ask_tags(terminal: &mut dyn Terminal) -> Result<Vec<String>, CommandError> {
+    ask_until_valid(
+        terminal,
+        |terminal| {
+            let line = optional_line(terminal, "Tags (comma-separated, optional): ")?;
+            Ok(line.as_deref().map_or_else(Vec::new, |line| {
+                line.split(',')
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }))
+        },
+        |tags| {
+            tags.iter()
+                .enumerate()
+                .filter_map(|(i, tag)| check::tag(tag, &tags[..i]).err())
+                .collect()
+        },
+    )
+}
+
+/// Asks for custom fields while the person wants more: a name checked against the
+/// fields before it ([`check::custom_field_name`]; an empty name stops), whether it is
+/// hidden, then a value ([`check::custom_field_value`]; an empty one is asked again).
+///
+/// Security: a hidden value is read through a hidden prompt and moved straight into a
+/// [`HiddenValue`].
+///
+/// ```ignore
+/// for field in ask_custom_fields(terminal)? { secret = secret.with_custom_field(field); }
+/// ```
+fn ask_custom_fields(terminal: &mut dyn Terminal) -> Result<Vec<CustomField>, CommandError> {
+    let mut fields: Vec<CustomField> = Vec::new();
+    while confirm(terminal, "Add a custom field?")? {
+        let name = ask_until_valid(
+            terminal,
+            |terminal| Ok(optional_line(terminal, "Field name: ")?),
+            |name| {
+                if_given(name.as_deref(), |name| {
+                    check::custom_field_name(name, &fields)
+                })
+            },
+        )?;
+        let Some(name) = name else {
+            break;
+        };
+        let hidden = confirm(terminal, "Hidden?")?;
+        let value = ask_until_valid(
+            terminal,
+            |terminal| {
+                Ok(if hidden {
+                    let mut value = terminal.read_hidden("Value: ")?;
+                    FieldValue::Hidden(HiddenValue::new(std::mem::take(&mut *value)))
+                } else {
+                    let mut value = terminal.read_line("Value: ")?;
+                    FieldValue::Plain(Zeroizing::new(std::mem::take(&mut *value)))
+                })
+            },
+            |value| as_problems(check::custom_field_value(value, &fields)),
+        )?;
+        fields.push(CustomField::new(name, value));
+    }
+    Ok(fields)
+}
+
+/// The problem of a single-field check as a list: empty if it passed.
+///
+/// ```ignore
+/// assert!(as_problems(check::title("GitHub")).is_empty());
+/// ```
+fn as_problems(checked: Result<(), FieldProblem>) -> Vec<FieldProblem> {
+    checked.err().into_iter().collect()
+}
+
+/// The problems `check` finds in an optional answer; none if it was left empty
+/// (`None`: "not set").
+///
+/// ```ignore
+/// assert!(if_given(None, check::url).is_empty());
+/// ```
+fn if_given<T: ?Sized>(
+    answer: Option<&T>,
+    check: impl FnOnce(&T) -> Result<(), FieldProblem>,
+) -> Vec<FieldProblem> {
+    answer.map_or_else(Vec::new, |answer| as_problems(check(answer)))
 }
 
 /// `list`: prints the table of all secrets.
