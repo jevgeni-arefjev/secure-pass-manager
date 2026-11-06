@@ -110,7 +110,7 @@ test("each problem of a refused secret goes next to its input, row and part", ()
   const placed = placeFieldErrors(
     [
       { field: "title", message: "bad title" },
-      { field: "tags", index: 1, message: "tags must differ by more than case" },
+      { field: "tags", index: 1, message: "tags must be unique, ignoring case" },
       { field: "tags", message: "too many tags" },
       { field: "custom_fields", index: 0, part: "value", message: "bad value" },
       { field: "custom_fields", index: 2, part: "name", message: "bad name" },
@@ -122,7 +122,7 @@ test("each problem of a refused secret goes next to its input, row and part", ()
   );
   assert.deepEqual(placed.fields, {
     title: ["bad title"],
-    tags: ['Tag "WORK": tags must differ by more than case', "too many tags"],
+    tags: ['Tag "WORK": tags must be unique, ignoring case', "too many tags"],
     custom_fields: ["too many custom fields"],
   });
   assert.deepEqual(placed.customFields, {

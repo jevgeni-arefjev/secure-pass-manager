@@ -55,38 +55,45 @@ pub enum CustomFieldPart {
 /// use vault_core::session::FieldProblem;
 /// assert_eq!(
 ///     FieldProblem::Title.to_string(),
-///     "title must be 1-64 characters, without control characters"
+///     "title must be 1-64 characters, without control or formatting characters"
 /// );
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldProblem {
-    /// Title empty after trimming, over 64 characters, or with control characters.
+    /// Title empty after trimming, over 64 characters, or with an unsafe character
+    /// (control, format or line/paragraph separator; see [`is_unsafe_char`]).
+    ///
+    /// [`is_unsafe_char`]: super::is_unsafe_char
     Title,
-    /// Username empty, over 256 characters, or with control characters.
+    /// Username empty after trimming, over 256 characters, or with an unsafe character.
     Username,
     /// Password empty, over 1024 characters, or with control characters.
     Password,
-    /// URL empty, over 2048 characters, or with control characters.
+    /// URL empty after trimming, over 2048 characters, or with an unsafe character.
     Url,
-    /// Notes empty, over 4096 characters, or with control characters other than
+    /// URL not an `http`/`https` URL with a host, nor a bare host such as `github.com`.
+    UnsupportedUrl,
+    /// Notes empty, over 4096 characters, or with an unsafe character other than
     /// newlines and tabs.
     Notes,
     /// More than 32 tags.
     TooManyTags,
-    /// The tag at this index is empty, over 32 characters, or has control characters.
+    /// The tag at this index is empty after trimming, over 32 characters, or has an
+    /// unsafe character.
     Tag(usize),
-    /// The tag at this index differs from an earlier one only in case.
+    /// The tag at this index repeats an earlier one, ignoring case and Unicode
+    /// composition.
     DuplicateTag(usize),
     /// More than 32 custom fields.
     TooManyCustomFields,
-    /// The custom field name at this index is empty, over 64 characters, or has
-    /// control characters.
+    /// The custom field name at this index is empty after trimming, over 64
+    /// characters, or has an unsafe character.
     CustomFieldName(usize),
-    /// The custom field value at this index is empty, over 1024 characters (the
-    /// password limit if hidden), or has control characters.
+    /// The custom field value at this index is empty, over 1024 characters, or has an
+    /// unsafe character (if hidden: a control character).
     CustomFieldValue(usize),
-    /// The custom field name at this index repeats an earlier one (ignoring case) or a
-    /// standard field name.
+    /// The custom field name at this index repeats an earlier one or a standard field
+    /// name, ignoring case and Unicode composition.
     DuplicateCustomFieldName(usize),
 }
 
@@ -103,7 +110,7 @@ impl FieldProblem {
             Self::Title => SecretField::Title,
             Self::Username => SecretField::Username,
             Self::Password => SecretField::Password,
-            Self::Url => SecretField::Url,
+            Self::Url | Self::UnsupportedUrl => SecretField::Url,
             Self::Notes => SecretField::Notes,
             Self::TooManyTags | Self::Tag(_) | Self::DuplicateTag(_) => SecretField::Tags,
             Self::TooManyCustomFields
@@ -161,25 +168,30 @@ impl fmt::Display for FieldProblem {
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let rule = |field: &str, max: usize| {
-            format!("{field} must be 1-{max} characters, without control characters")
+            format!("{field} must be 1-{max} characters, without control or formatting characters")
         };
         let message = match self {
             Self::Title => rule("title", MAX_TITLE),
             Self::Username => rule("username", MAX_USERNAME),
-            Self::Password => rule("password", MAX_HIDDEN),
+            Self::Password => {
+                format!("password must be 1-{MAX_HIDDEN} characters, without control characters")
+            }
             Self::Url => rule("URL", MAX_URL),
+            Self::UnsupportedUrl => "URL must be an http:// or https:// address with a host, \
+                or a bare host such as github.com; keep other addresses in notes or a custom field"
+                .to_owned(),
             Self::Notes => format!(
-                "notes must be 1-{MAX_NOTES} characters, without control characters other than newlines and tabs"
+                "notes must be 1-{MAX_NOTES} characters, without control or formatting characters other than newlines and tabs"
             ),
             Self::TooManyTags => format!("a secret can have at most {MAX_TAGS} tags"),
             Self::Tag(_) => rule("each tag", MAX_TAG),
-            Self::DuplicateTag(_) => "tags must differ by more than case".to_owned(),
+            Self::DuplicateTag(_) => "tags must be unique, ignoring case".to_owned(),
             Self::TooManyCustomFields => {
                 format!("a secret can have at most {MAX_CUSTOM_FIELDS} custom fields")
             }
             Self::CustomFieldName(_) => rule("custom field names", MAX_FIELD_NAME),
             Self::CustomFieldValue(_) => format!(
-                "custom field values must be 1-{MAX_FIELD_VALUE} characters (hidden: 1-{MAX_HIDDEN}), without control characters"
+                "custom field values must be 1-{MAX_FIELD_VALUE} characters, without control or formatting characters (hidden: 1-{MAX_HIDDEN}, without control characters)"
             ),
             Self::DuplicateCustomFieldName(_) => {
                 "custom field names must be unique and differ from the standard fields".to_owned()
@@ -234,7 +246,7 @@ impl fmt::Display for InvalidSecret {
     /// Writes every problem's rule, separated by `; `.
     ///
     /// ```ignore
-    /// // "title must be 1-64 characters, ...; tags must differ by more than case"
+    /// // "title must be 1-64 characters, ...; tags must be unique, ignoring case"
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, problem) in self.problems.iter().enumerate() {

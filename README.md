@@ -19,10 +19,12 @@ It is a password manager with one shared Rust core and two front ends:
 ├── .github/workflows/      # CI: clippy, tests, client check/test/build and release build on macOS
 ├── docs/agents/            # notes for coding agents: issue tracker, triage labels, domain docs
 ├── docs/adr/               # architecture decision records
+├── fixtures/               # unsafe-characters.json: unsafe characters and safe look-alikes, shared by the core, CLI and web client tests
 ├── vault-core/             # shared library, no I/O front end
 │   ├── tests/crypto.rs     # encryption module behaviour, through its public API
 │   ├── tests/storage.rs    # storage module behaviour, through its public API: one size limit for load and save
 │   ├── tests/session.rs    # session module behaviour, through its public API
+│   ├── tests/text_rules.rs # field text rules through Session: unsafe characters (shared fixture), limits in characters, trimming and NFC, title matching, URL forms, stored secrets breaking the rules
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
 │   ├── tests/backup.rs     # backup destinations and Session::backup, through the public API
 │   ├── tests/generator.rs  # password generator behaviour, through its public API
@@ -37,10 +39,10 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── audit.rs        # Audit log: typed events as JSON Lines in `audit.log` per vault home, at most a title, rotated at 1 MiB, fail-open (ADR-0010)
 │       ├── backup.rs       # Backup: ciphertext-only copy of a vault file to a new file outside the vault directory, verified, never overwriting
 │       ├── session.rs      # Session: create/unlock/lock, auto-lock, uniform unlock failures, saves every change at once, records audit events (single user in MVP)
-│       └── session/        # secret model + field validation (every problem reported at once), JSON body, master password policy, clock
+│       └── session/        # secret model + field validation (every problem reported at once; text rules: unsafe characters, trimming, NFC, URL forms), JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   ├── tests/args.rs       # command grammar and help text, through its public API
-│   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping), through its public API
+│   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping against the shared fixture), through its public API
 │   ├── tests/shell.rs      # the CLI and vault shell end to end, on a scripted fake terminal
 │   └── src/
 │       ├── main.rs         # hardens the process, logs warnings to stderr, runs the CLI on the real terminal
@@ -51,7 +53,7 @@ It is a password manager with one shared Rust core and two front ends:
 │       ├── clipboard.rs    # `--copy`: excluded from clipboard history, cleared after 20 s, on lock and exit
 │       ├── terminal.rs     # Terminal trait (fakeable in tests) and the real stdin/stdout one; in-memory history only
 │       ├── terminal/       # masked prompt: one `*` per character, zeroizing buffer (ADR-0008)
-│       └── render.rs       # get view, list table, log view and every problem of a refused save; escapes control and bidi characters; hidden fields shown as `*`
+│       └── render.rs       # get view, list table, log view and every problem of a refused save; escapes exactly the characters the core refuses; hidden fields shown as `*`
 ├── vault-web/              # `vault-web` binary: HTTPS server for the browser client
 │   ├── build.rs            # embeds assets/ into the binary at compile time; never runs npm
 │   ├── assets/             # client bundle from `npm run build` in web/ (not committed)
@@ -85,7 +87,7 @@ It is a password manager with one shared Rust core and two front ends:
     ├── tsconfig.json       # strict type-checking of src/; tsconfig.test.json adds test/ and emits to .test-build/
     ├── scripts/build.mjs   # `npm run build`: esbuild bundle + static files into vault-web/assets
     ├── static/             # index.html and app.css (no inline scripts or styles)
-    ├── src/                # main.ts (create/unlock/list/detail/add/edit pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked), forms.ts, secret-form.ts (form values → add/edit request, unchanged hidden fields, where each field problem is shown), secrets.ts (search, title paths), reveal.ts (30 s reveal, 20 s clipboard clear), session-watch.ts (session check every 30 s and when the tab returns), text.ts (control/bidi escapes), url.ts (http/https link allowlist)
+    ├── src/                # main.ts (create/unlock/list/detail/add/edit pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked), forms.ts, secret-form.ts (form values → add/edit request, unchanged hidden fields, where each field problem is shown), secrets.ts (search, title paths), reveal.ts (30 s reveal, 20 s clipboard clear), session-watch.ts (session check every 30 s and when the tab returns), text.ts (escapes exactly the characters the server refuses), url.ts (http/https link allowlist)
     └── test/               # node:test tests of the pure helpers
 ```
 
@@ -185,6 +187,25 @@ All commands are listed in [`secure-password-manager.md` §5](secure-password-ma
 - `backup <path>` writes an encrypted copy of the vault file to a new file outside the vault directory, e.g. `backup /media/usb/alice.vault`; it never overwrites. To restore, create a vault home and put the backup in it: `mkdir -m 700 ~/.local/share/secure-pass-manager/vaults/alice && cp /media/usb/alice.vault ~/.local/share/secure-pass-manager/vaults/alice/secrets.vault`, then `vault unlock alice`. Any vaultname works. On macOS, use the macOS vault directory above, in quotes because of the space.
 - `--copy` needs a display (X11 or Wayland on Linux, a logged-in desktop session on macOS); over plain SSH it reports that the clipboard is not available.
 - If the process is killed by a signal while waiting at the `vault>` prompt, the vault is wiped, but the terminal can be left in raw mode; type `reset` to fix it.
+
+### Secret fields
+
+Both front ends save through the same core rules (ADR-0013); a refused save lists every invalid field at once.
+
+| Field | Accepts |
+| --- | --- |
+| Title | 1-64 characters; identifies the secret, so lookups (`get`, reveal, `rm`, replace on save) ignore case, surrounding spaces and Unicode composition (`café` typed either way is one secret) |
+| Username | 1-256 characters |
+| Password | 1-1024 characters, hidden |
+| URL | 1-2048 characters: an `http://` or `https://` URL with a host (`https://github.com/login`, `http://localhost:8080`), or a bare host such as `github.com` (optionally with a port and path), stored as typed. Anything else (`javascript:`, `data:`, `file:`, `ssh://`, `https://` without a host) is refused: put other addresses in the notes or a custom field |
+| Notes | 1-4096 characters; may span several lines (newlines and tabs) |
+| Tags | at most 32, each 1-32 characters, no two alike ignoring case and composition |
+| Custom fields | at most 32; name 1-64 characters, unique ignoring case and composition, not a standard field name; value 1-1024 characters, hidden or not |
+
+- Lengths count characters, not bytes.
+- Fields that aren't hidden refuse control characters (notes allow newline and tab), every Unicode format character (zero-width characters, bidirectional controls, soft hyphen, tag characters, ...) and the line and paragraph separators, so nothing invisible can disguise a title or drive the terminal. They are stored NFC-normalised, and the single-line ones (all but notes) have surrounding spaces trimmed and must hold more than spaces.
+- Hidden fields (the password and hidden custom fields) are stored exactly as entered, byte for byte, surrounding spaces included; they refuse only control characters.
+- A vault saved under older, looser rules still opens: such a secret lists, shows (with unsafe characters as visible escapes such as `\u{202e}`), reveals and deletes, but saving it is refused with a message naming the field. Fix that field and save again. A title that breaks a rule can't be fixed in place (the web edit form keeps the title read-only): recreate the secret under a new title (CLI: `get <old title> --show`, then `save <new title>` and enter its fields again; web: **Add secret**, then copy the fields over, revealing hidden ones one at a time), check it, then delete the old one (`rm <old title>`, or **Delete** on the web).
 
 ### Tests and checks
 

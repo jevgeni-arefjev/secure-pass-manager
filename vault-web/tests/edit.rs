@@ -431,13 +431,63 @@ async fn refused_secrets_list_every_field_and_never_echo_a_value() {
             at("title", None, None),
         ),
         (
+            "soft hyphen in title",
+            json!({"title": format!("{marker}\u{ad}")}),
+            at("title", None, None),
+        ),
+        (
+            "tag character in username",
+            json!({"title": "t", "username": format!("{marker}\u{e0041}")}),
+            at("username", None, None),
+        ),
+        (
+            "javascript URL",
+            json!({"title": "t", "url": format!("javascript:alert('{marker}')")}),
+            at("url", None, None),
+        ),
+        (
+            "URL without a host",
+            json!({"title": "t", "url": "https://"}),
+            at("url", None, None),
+        ),
+        (
+            "ssh URL",
+            json!({"title": "t", "url": format!("ssh://{marker}")}),
+            at("url", None, None),
+        ),
+        (
+            "line separator in notes",
+            json!({"title": "t", "notes": format!("{marker}\u{2028}")}),
+            at("notes", None, None),
+        ),
+        (
+            "whitespace-only tag",
+            json!({"title": "t", "tags": ["work", "   "]}),
+            at("tags", Some(1), None),
+        ),
+        (
+            "NFC-equal tags",
+            json!({"title": "t", "tags": ["caf\u{e9}", " CAFE\u{301}"]}),
+            at("tags", Some(1), None),
+        ),
+        (
+            "zero-width joiner in custom name",
+            json!({"title": "t", "custom_fields": [field(&format!("{marker}\u{200d}"), false, json!("v"))]}),
+            at("custom_fields", Some(0), Some("name")),
+        ),
+        (
+            "whitespace-only custom name",
+            json!({"title": "t", "custom_fields": [field("  ", false, json!("v"))]}),
+            at("custom_fields", Some(0), Some("name")),
+        ),
+        (
             "empty username",
             json!({"title": "t", "username": ""}),
             at("username", None, None),
         ),
         (
             "newline in username",
-            json!({"title": "t", "username": format!("{marker}\n")}),
+            json!({"title": "t", "username": format!("{marker}\nx")}),
             at("username", None, None),
         ),
         (
@@ -533,13 +583,13 @@ async fn refused_secrets_list_every_field_and_never_echo_a_value() {
     assert_eq!(
         error["fields"],
         json!([
-            {"field": "title", "message": "title must be 1-64 characters, without control characters"},
-            {"field": "tags", "index": 1, "message": "tags must differ by more than case"},
+            {"field": "title", "message": "title must be 1-64 characters, without control or formatting characters"},
+            {"field": "tags", "index": 1, "message": "tags must be unique, ignoring case"},
             {
                 "field": "custom_fields",
                 "index": 0,
                 "part": "value",
-                "message": "custom field values must be 1-1024 characters (hidden: 1-1024), without control characters",
+                "message": "custom field values must be 1-1024 characters, without control or formatting characters (hidden: 1-1024, without control characters)",
             },
         ])
     );

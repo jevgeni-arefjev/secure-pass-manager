@@ -16,8 +16,13 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::crypto::LockedBytes;
 
 mod invalid;
+mod text;
+mod url;
 
 pub use invalid::{CustomFieldPart, FieldProblem, InvalidSecret, SecretField};
+pub use text::is_unsafe_char;
+
+use text::TextKind;
 
 /// Longest title, in characters.
 const MAX_TITLE: usize = 64;
@@ -349,7 +354,8 @@ pub struct Secret {
 }
 
 impl Secret {
-    /// A new secret with only a title. Surrounding spaces are trimmed when it is saved.
+    /// A new secret with only a title. When it is saved, the title (like every other
+    /// single-line non-hidden field) is trimmed and NFC-normalised.
     ///
     /// ```
     /// # use vault_core::session::Secret;
@@ -395,7 +401,8 @@ impl Secret {
         self
     }
 
-    /// Sets the URL. It is stored as typed, not parsed.
+    /// Sets the URL: an `http` or `https` URL with a host, or a bare host such as
+    /// `github.com`. It is stored as typed (trimmed and NFC-normalised), never rewritten.
     ///
     /// ```
     /// # use vault_core::session::Secret;
@@ -546,22 +553,23 @@ impl Secret {
         self.updated_at
     }
 
-    /// Whether this secret's title matches `title`, ignoring case and surrounding spaces.
+    /// Whether this secret's title matches `title`, ignoring case, surrounding spaces
+    /// and Unicode composition (NFC).
     ///
     /// ```ignore
-    /// assert!(Secret::new("GitHub").has_title(" github "));
+    /// assert!(Secret::new("Caf\u{e9}").has_title(" CAFE\u{301}"));
     /// ```
     pub(super) fn has_title(&self, title: &str) -> bool {
-        same_ignoring_case(&self.title, title.trim())
+        text::same_folded(&self.title, title)
     }
 
-    /// Orders secrets by title, ignoring case, for listing.
+    /// Orders secrets by title, ignoring case and Unicode composition, for listing.
     ///
     /// ```ignore
     /// secrets.sort_by(|a, b| a.cmp_title(b));
     /// ```
     pub(super) fn cmp_title(&self, other: &Self) -> std::cmp::Ordering {
-        lowercase(&self.title).cmp(lowercase(&other.title))
+        text::folded(&self.title).cmp(text::folded(&other.title))
     }
 
     /// Sets the timestamps of a save at `now`, keeping `created_at` from the secret
@@ -594,59 +602,92 @@ impl Secret {
             .all(HiddenValue::is_memory_locked)
     }
 
-    /// Trims the title and checks every field against the rules on [`FieldProblem`],
-    /// collecting every problem rather than stopping at the first.
+    /// Puts every non-hidden field into its stored form (trimmed and NFC-normalised; notes only
+    /// NFC-normalised) and checks every field against the rules on [`FieldProblem`], collecting
+    /// every problem rather than stopping at the first. Hidden fields are left as
+    /// entered.
     ///
-    /// Security: this is where control characters are refused, so nothing saved can
-    /// drive a terminal when it is printed later. Problems name the field, never the
+    /// Security: this is where control, format and separator characters are refused
+    /// (hidden fields: control characters only), so nothing saved can drive a terminal
+    /// or disguise itself when it is shown later. Problems name the field, never the
     /// value.
     ///
     /// ```ignore
     /// secret.validate()?;
     /// ```
     pub(super) fn validate(&mut self) -> Result<(), InvalidSecret> {
-        let trimmed = self.title.trim();
-        if trimmed.len() != self.title.len() {
-            self.title = Zeroizing::new(trimmed.to_owned());
-        }
-        let mut problems = Vec::new();
-        let mut check = |text: Option<&str>, max: usize, multiline: bool, problem| {
-            if text.is_some_and(|text| check_text(text, max, multiline).is_none()) {
-                problems.push(problem);
-            }
+        self.normalize();
+        let broken = |text: Option<&str>, max: usize, kind: TextKind, problem| {
+            text.is_some_and(|text| !text::is_valid(text, max, kind))
+                .then_some(problem)
         };
-        check(Some(&self.title), MAX_TITLE, false, FieldProblem::Title);
-        check(
-            self.username.as_deref().map(String::as_str),
-            MAX_USERNAME,
-            false,
-            FieldProblem::Username,
-        );
-        check(
-            self.password.as_ref().map(HiddenValue::reveal),
-            MAX_HIDDEN,
-            false,
-            FieldProblem::Password,
-        );
-        check(
-            self.url.as_deref().map(String::as_str),
-            MAX_URL,
-            false,
-            FieldProblem::Url,
-        );
-        check(
-            self.notes.as_deref().map(String::as_str),
-            MAX_NOTES,
-            true,
-            FieldProblem::Notes,
-        );
+        let url = self.url.as_deref().map(String::as_str);
+        let url_problem =
+            broken(url, MAX_URL, TextKind::SingleLine, FieldProblem::Url).or_else(|| {
+                url.is_some_and(|url| !url::is_supported(url))
+                    .then_some(FieldProblem::UnsupportedUrl)
+            });
+        let mut problems: Vec<FieldProblem> = [
+            broken(
+                Some(&self.title),
+                MAX_TITLE,
+                TextKind::SingleLine,
+                FieldProblem::Title,
+            ),
+            broken(
+                self.username.as_deref().map(String::as_str),
+                MAX_USERNAME,
+                TextKind::SingleLine,
+                FieldProblem::Username,
+            ),
+            broken(
+                self.password.as_ref().map(HiddenValue::reveal),
+                MAX_HIDDEN,
+                TextKind::Hidden,
+                FieldProblem::Password,
+            ),
+            url_problem,
+            broken(
+                self.notes.as_deref().map(String::as_str),
+                MAX_NOTES,
+                TextKind::Notes,
+                FieldProblem::Notes,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         self.check_tags(&mut problems);
         self.check_custom_fields(&mut problems);
         InvalidSecret::from_problems(problems)
     }
 
+    /// Trims and NFC-normalises every non-hidden field in place; notes are NFC-normalised only.
+    ///
+    /// ```ignore
+    /// self.normalize(); // " Cafe\u{301} " is now "Caf\u{e9}"
+    /// ```
+    fn normalize(&mut self) {
+        text::normalize_single_line(&mut self.title);
+        for field in [&mut self.username, &mut self.url].into_iter().flatten() {
+            text::normalize_single_line(field);
+        }
+        if let Some(notes) = &mut self.notes {
+            text::normalize_notes(notes);
+        }
+        for tag in &mut self.tags {
+            text::normalize_single_line(tag);
+        }
+        for field in &mut self.custom_fields {
+            text::normalize_single_line(&mut field.name);
+            if let FieldValue::Plain(value) = &mut field.value {
+                text::normalize_single_line(value);
+            }
+        }
+    }
+
     /// Adds to `problems` a too-high tag count, each broken tag, and each tag that
-    /// differs from an earlier one only in case.
+    /// repeats an earlier one (ignoring case and Unicode composition).
     ///
     /// ```ignore
     /// self.check_tags(&mut problems);
@@ -656,11 +697,11 @@ impl Secret {
             problems.push(FieldProblem::TooManyTags);
         }
         for (i, tag) in self.tags.iter().enumerate() {
-            if check_text(tag, MAX_TAG, false).is_none() {
+            if !text::is_valid(tag, MAX_TAG, TextKind::SingleLine) {
                 problems.push(FieldProblem::Tag(i));
             } else if self.tags[..i]
                 .iter()
-                .any(|seen| same_ignoring_case(seen, tag))
+                .any(|seen| text::same_folded(seen, tag))
             {
                 problems.push(FieldProblem::DuplicateTag(i));
             }
@@ -668,8 +709,8 @@ impl Secret {
     }
 
     /// Adds to `problems` a too-high custom field count, each broken name and value,
-    /// and each name that repeats an earlier one (ignoring case) or a standard field
-    /// name.
+    /// and each name that repeats an earlier one or a standard field name (ignoring
+    /// case and Unicode composition).
     ///
     /// ```ignore
     /// self.check_custom_fields(&mut problems);
@@ -679,63 +720,24 @@ impl Secret {
             problems.push(FieldProblem::TooManyCustomFields);
         }
         for (i, field) in self.custom_fields.iter().enumerate() {
-            if check_text(&field.name, MAX_FIELD_NAME, false).is_none() {
+            if !text::is_valid(&field.name, MAX_FIELD_NAME, TextKind::SingleLine) {
                 problems.push(FieldProblem::CustomFieldName(i));
             } else if STANDARD_FIELD_NAMES
                 .iter()
-                .any(|standard| same_ignoring_case(standard, &field.name))
+                .any(|standard| text::same_folded(standard, &field.name))
                 || self.custom_fields[..i]
                     .iter()
-                    .any(|seen| same_ignoring_case(&seen.name, &field.name))
+                    .any(|seen| text::same_folded(&seen.name, &field.name))
             {
                 problems.push(FieldProblem::DuplicateCustomFieldName(i));
             }
-            let (value, max) = match &field.value {
-                FieldValue::Plain(text) => (text.as_str(), MAX_FIELD_VALUE),
-                FieldValue::Hidden(hidden) => (hidden.reveal(), MAX_HIDDEN),
+            let (value, max, kind) = match &field.value {
+                FieldValue::Plain(text) => (text.as_str(), MAX_FIELD_VALUE, TextKind::SingleLine),
+                FieldValue::Hidden(hidden) => (hidden.reveal(), MAX_HIDDEN, TextKind::Hidden),
             };
-            if check_text(value, max, false).is_none() {
+            if !text::is_valid(value, max, kind) {
                 problems.push(FieldProblem::CustomFieldValue(i));
             }
         }
     }
-}
-
-/// `Some(())` if `text` is 1..=`max` characters and has no control characters
-/// (newlines and tabs allowed only when `multiline`).
-///
-/// Security: besides C0/C1 controls (escape sequences), refuses invisible formatting
-/// characters that can make text display differently than it reads: zero-width
-/// characters and bidirectional overrides ("Trojan Source").
-///
-/// ```ignore
-/// assert!(check_text("github", 64, false).is_some());
-/// assert!(check_text("\u{1b}[2J", 64, false).is_none());
-/// ```
-fn check_text(text: &str, max: usize, multiline: bool) -> Option<()> {
-    let len = text.chars().count();
-    let allowed = |c: char| {
-        let invisible = matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
-        let control = c.is_control() && !(multiline && matches!(c, '\n' | '\t'));
-        !invisible && !control
-    };
-    ((1..=max).contains(&len) && text.chars().all(allowed)).then_some(())
-}
-
-/// `text` lowercased lazily, without allocating a copy.
-///
-/// ```ignore
-/// lowercase("GitHub").eq(lowercase("github"))
-/// ```
-fn lowercase(text: &str) -> impl Iterator<Item = char> + '_ {
-    text.chars().flat_map(char::to_lowercase)
-}
-
-/// Whether two strings are equal ignoring case (full Unicode lowercasing).
-///
-/// ```ignore
-/// assert!(same_ignoring_case("GitHub", "github"));
-/// ```
-fn same_ignoring_case(a: &str, b: &str) -> bool {
-    lowercase(a).eq(lowercase(b))
 }

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use vault_cli::render::{self, Reveal};
 use vault_core::audit::{Event, Line, MemorySink, Record};
 use vault_core::crypto::MasterPassword;
@@ -34,6 +35,78 @@ fn full_secret() -> Secret {
         .with_notes("first line\nsecond line")
         .with_custom_field(CustomField::plain("region", "eu-west"))
         .with_custom_field(CustomField::hidden("recovery code", hidden("1234-5678")))
+}
+
+/// The shared fixture of unsafe and safe characters, also read by the core and web tests.
+const FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../fixtures/unsafe-characters.json"
+));
+
+/// A character from a fixture code point such as `"202E"`.
+///
+/// ```text
+/// assert_eq!(code_point("0041"), 'A');
+/// ```
+fn code_point(hex: &str) -> char {
+    char::from_u32(u32::from_str_radix(hex, 16).unwrap()).unwrap()
+}
+
+/// The visible escape `render::escape` shows for `c`: `\x1b` up to U+00FF, else `\u{202e}`.
+///
+/// ```text
+/// assert_eq!(escaped('\u{1b}'), r"\x1b");
+/// ```
+fn escaped(c: char) -> String {
+    let c = u32::from(c);
+    if c <= 0xff {
+        format!("\\x{c:02x}")
+    } else {
+        format!("\\u{{{c:x}}}")
+    }
+}
+
+#[test]
+fn escape_shows_every_unsafe_character_of_the_shared_fixture_and_keeps_its_safe_ones() {
+    let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+    let multiline_safe: Vec<char> = fixture["multiline_safe"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| code_point(c.as_str().unwrap()))
+        .collect();
+    let mut checked = 0;
+    for range in fixture["unsafe"].as_array().unwrap() {
+        let from = u32::from(code_point(range["from"].as_str().unwrap()));
+        let to = u32::from(code_point(range["to"].as_str().unwrap()));
+        for c in (from..=to).map(|c| char::from_u32(c).unwrap()) {
+            let text = format!("a{c}b");
+            let single = format!("a{}b", escaped(c));
+            assert_eq!(
+                render::escape(&text, false).as_str(),
+                single,
+                "U+{:04X}",
+                u32::from(c)
+            );
+            let multi = if multiline_safe.contains(&c) {
+                &text
+            } else {
+                &single
+            };
+            assert_eq!(
+                render::escape(&text, true).as_str(),
+                multi,
+                "U+{:04X}",
+                u32::from(c)
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 200);
+    for entry in fixture["safe"].as_array().unwrap() {
+        let text = format!("a{}b", code_point(entry["char"].as_str().unwrap()));
+        assert_eq!(render::escape(&text, false).as_str(), text);
+    }
 }
 
 #[test]

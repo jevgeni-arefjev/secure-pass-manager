@@ -66,7 +66,7 @@ pub use master_password_policy::{
 };
 pub use secret::{
     CustomField, CustomFieldPart, FieldProblem, FieldValue, HiddenValue, InvalidSecret, Secret,
-    SecretField,
+    SecretField, is_unsafe_char,
 };
 
 /// Idle time after which a session locks itself, unless configured otherwise.
@@ -1094,18 +1094,71 @@ pub fn fill_vault_for_tests<S: VaultStore>(
     vaultname: &str,
     password: &MasterPassword,
 ) -> Result<(), SessionError> {
+    rewrite_body_for_tests(store, vaultname, password, |secrets| {
+        secrets.push(Secret::new(FILLER_TITLE).with_notes("x"));
+        let with_one_x = body::encode(secrets).as_bytes().len();
+        let max = usize::try_from(crate::storage::MAX_VAULT_FILE_LEN).expect("fits in memory");
+        let notes = "x".repeat(1 + crypto::largest_plaintext_len(max) - with_one_x);
+        *secrets.last_mut().expect("just pushed") = Secret::new(FILLER_TITLE).with_notes(notes);
+    })
+}
+
+/// Adds `secret` to `vaultname`'s vault (unlocked with `password`) as it is, without
+/// trimming, normalising or checking it: a stand-in for a secret saved by a build with
+/// older, looser field rules.
+///
+/// Security: never for real vaults. Exists only with the `insecure-test-kdf` feature,
+/// which release builds refuse.
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use vault_core::audit::MemorySink;
+/// # use vault_core::crypto::MasterPassword;
+/// # use vault_core::session::{self, Secret, Session, SessionConfig};
+/// # use vault_core::storage::FileStore;
+/// # let dir = tempfile::tempdir()?;
+/// # let config = || SessionConfig::new(Arc::new(MemorySink::default()));
+/// let password = MasterPassword::new("correct horse battery".into());
+/// Session::create_insecure_for_tests(FileStore::new(dir.path())?, "alice", &password, config())?.lock();
+/// let old = Secret::new("evil\u{202e}gpj.exe");
+/// session::insert_unchecked_for_tests(&FileStore::new(dir.path())?, "alice", &password, old)?;
+/// let mut session = Session::unlock(FileStore::new(dir.path())?, "alice", &password, config())?;
+/// assert_eq!(session.list()?.len(), 1);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[cfg(feature = "insecure-test-kdf")]
+pub fn insert_unchecked_for_tests<S: VaultStore>(
+    store: &S,
+    vaultname: &str,
+    password: &MasterPassword,
+    secret: Secret,
+) -> Result<(), SessionError> {
+    rewrite_body_for_tests(store, vaultname, password, |secrets| secrets.push(secret))
+}
+
+/// Opens `vaultname`'s vault with `password`, lets `change` edit its secrets directly,
+/// and seals and saves the result, past every check of [`Session::save`].
+///
+/// Security: never for real vaults; only with the `insecure-test-kdf` feature.
+///
+/// ```ignore
+/// rewrite_body_for_tests(store, "alice", &password, |secrets| secrets.clear())?;
+/// ```
+#[cfg(feature = "insecure-test-kdf")]
+fn rewrite_body_for_tests<S: VaultStore>(
+    store: &S,
+    vaultname: &str,
+    password: &MasterPassword,
+    change: impl FnOnce(&mut Vec<Secret>),
+) -> Result<(), SessionError> {
     let vaultname = Vaultname::parse(vaultname)?;
     let sealed = store.load(&vaultname)?;
     let key = crypto::unlock(&sealed.header, password)?;
     let plaintext = crypto::open_body(&key, &sealed)?;
     let mut secrets = body::decode(&plaintext).map_err(|_| SessionError::VaultUnreadable)?;
-    secrets.push(Secret::new(FILLER_TITLE).with_notes("x"));
-    let with_one_x = body::encode(&secrets).as_bytes().len();
-    let max = usize::try_from(crate::storage::MAX_VAULT_FILE_LEN).expect("fits in memory");
-    let notes = "x".repeat(1 + crypto::largest_plaintext_len(max) - with_one_x);
-    *secrets.last_mut().expect("just pushed") = Secret::new(FILLER_TITLE).with_notes(notes);
-    let full = crypto::seal(&key, &sealed.header, &body::encode(&secrets))?;
-    store.save(&vaultname, &full)?;
+    change(&mut secrets);
+    let changed = crypto::seal(&key, &sealed.header, &body::encode(&secrets))?;
+    store.save(&vaultname, &changed)?;
     Ok(())
 }
 

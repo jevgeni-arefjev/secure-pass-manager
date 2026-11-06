@@ -104,7 +104,8 @@ export function parseTags(text: string): string[] {
  * The add or edit request body for `values`. Blank optional fields are left out; an
  * empty password is left out too, so the server generates one; untouched hidden
  * fields are sent as `{"unchanged": true}`. Values are otherwise sent as typed: the
- * server validates every field and trims only the title.
+ * server validates every field, trims and NFC-normalises the non-hidden single-line
+ * ones, and keeps hidden values exactly as entered.
  *
  * @example
  * await api.addSecret(secretRequest(values));

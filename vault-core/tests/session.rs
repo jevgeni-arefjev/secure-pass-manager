@@ -758,24 +758,13 @@ fn problem_messages_state_the_rule_and_never_the_value() {
     assert_eq!(invalid.problems().len(), 5);
     assert_eq!(
         invalid.problems()[0].to_string(),
-        "title must be 1-64 characters, without control characters"
+        "title must be 1-64 characters, without control or formatting characters"
     );
     for problem in invalid.problems() {
         assert!(!problem.to_string().contains("zebracorn"), "{problem}");
     }
     assert!(!invalid.to_string().contains("zebracorn"));
     assert!(!format!("{invalid:?}").contains("zebracorn"));
-}
-
-#[test]
-fn boundary_values_are_accepted() {
-    let secret = Secret::new("é".repeat(64))
-        .with_username("u".repeat(256))
-        .with_password(HiddenValue::new("p".repeat(1024)))
-        .with_url("h".repeat(2048))
-        .with_notes(format!("line one\n\tline two{}", "n".repeat(4000)))
-        .with_tag("t".repeat(32));
-    assert_eq!(save_result(secret), Ok(Saved::Added));
 }
 
 #[test]

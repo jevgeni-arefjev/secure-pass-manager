@@ -2,11 +2,12 @@
 //! the `log` view and the problems of a refused save.
 //!
 //! Security:
-//! - Every stored text is escaped before it reaches the terminal ([`escape`]): control
-//!   characters and invisible or bidirectional formatting characters are shown as
-//!   `\x1b` / `\u{202e}` escapes, so a crafted vault can't drive the terminal or
-//!   disguise what is printed. The core already refuses them on save; this also covers
-//!   vaults written by other builds.
+//! - Every stored text is escaped before it reaches the terminal ([`escape`]): exactly
+//!   the characters the core refuses in non-hidden fields ([`is_unsafe_char`]: control
+//!   characters, the Unicode format category, line and paragraph separators) are shown
+//!   as `\x1b` / `\u{202e}` escapes, so a crafted vault can't drive the terminal or
+//!   disguise what is printed. The core refuses them on save; this also covers vaults
+//!   written by other builds and secrets saved under older rules.
 //! - A masked hidden field is shown as a single `*`, whatever its length (ADR-0008).
 //! - Output is returned in zeroizing strings, like the fields it is built from.
 
@@ -17,6 +18,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vault_core::audit::{Event, Line};
 use vault_core::session::{
     CustomFieldPart, FieldProblem, FieldValue, HiddenValue, InvalidSecret, Secret, SecretField,
+    is_unsafe_char,
 };
 use zeroize::Zeroizing;
 
@@ -35,21 +37,22 @@ pub enum Reveal {
     Shown,
 }
 
-/// `text` with every control, invisible or bidirectional formatting character replaced
-/// by a visible escape. With `multiline`, newlines and tabs are kept (for notes).
+/// `text` with every character the core refuses in non-hidden fields
+/// ([`is_unsafe_char`]) replaced by a visible escape. With `multiline`, newlines and
+/// tabs are kept (for notes).
 ///
 /// ```
 /// use vault_cli::render::escape;
 /// assert_eq!(escape("evil\u{1b}[2J", false).as_str(), r"evil\x1b[2J");
 /// assert_eq!(escape("txt\u{202e}gpj.exe", false).as_str(), r"txt\u{202e}gpj.exe");
+/// assert_eq!(escape("soft\u{ad}hyphen", false).as_str(), r"soft\xadhyphen");
 /// assert_eq!(escape("line 1\nline 2", true).as_str(), "line 1\nline 2");
 /// ```
 #[must_use]
 pub fn escape(text: &str, multiline: bool) -> Zeroizing<String> {
     let mut out = Zeroizing::new(String::with_capacity(text.len()));
     for c in text.chars() {
-        let kept_whitespace = multiline && matches!(c, '\n' | '\t');
-        if kept_whitespace || !(c.is_control() || is_invisible(c)) {
+        if !is_unsafe_char(c, multiline) {
             out.push(c);
         } else if u32::from(c) <= 0xff {
             let _ = write!(out, "\\x{:02x}", u32::from(c));
@@ -251,16 +254,6 @@ fn describe(event: &Event) -> &'static str {
     }
 }
 
-/// Whether `c` is an invisible or bidirectional formatting character (zero-width
-/// spaces, direction overrides and isolates, byte order mark).
-///
-/// ```ignore
-/// assert!(is_invisible('\u{202e}'));
-/// ```
-fn is_invisible(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
-}
-
 /// The secret's tags, escaped and joined with `, `.
 ///
 /// ```ignore
@@ -366,7 +359,7 @@ fn pad(out: &mut String, n: usize) {
 /// # fn show(invalid: &vault_core::session::InvalidSecret) {
 /// eprintln!("vault: {}", render::invalid_secret(invalid));
 /// // vault: secret not saved:
-/// //   tag 2: tags must differ by more than case
+/// //   tag 2: tags must be unique, ignoring case
 /// # }
 /// ```
 #[must_use]
