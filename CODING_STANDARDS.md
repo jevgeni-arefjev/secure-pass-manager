@@ -13,6 +13,11 @@ The judgement calls a reviewer checks in every diff. Rules a tool already enforc
 - A field or secret rule has one home in `vault-core` (e.g. `session::check`, `Secret::validate`); the CLI and the server call it. A front end may pre-check for a faster answer (the web form marking an empty value), but the core stays authoritative, and the pre-check's docstring says which core rule it mirrors.
 - Messages for the person name the field and the rule, never the value.
 
+## Errors and logging
+
+- Every error a front end shows belongs to one class in ADR-0014 (input mistake, security refusal, session ended, internal failure), and the class decides the message, the audit event and the diagnostic. A new error variant gets its class in the same diff.
+- Audit events go through the typed `audit::Event`; everything else operational is a diagnostic through `tracing` with an `event = "..."` code. Neither holds a field value, master password, path, request URL or panic message; a diagnostic names the vaultname only when it is about that vault's own files.
+
 ## Tests
 
 - Tests sit in each crate's `tests/` and go through the public API: the vault shell through `shell::run` with the scripted fake terminal, the server through HTTP, the web client through its pure helpers.

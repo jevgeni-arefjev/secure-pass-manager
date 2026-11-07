@@ -41,7 +41,7 @@ These are deliberate design choices that differ from `course-project-requirement
 
 ## Finishing work
 
-Leave changes uncommitted for the user to review; this overrides skills that commit. End with whether the work is ready to commit (which checks ran and passed, what is still open) and a proposed message in the repo's style: one commit per issue, `<summary> (closes #N)`. Commit or branch only when the user asks.
+Leave changes uncommitted for the user to review; this overrides skills that commit. End with whether the work is ready to commit (which checks ran and passed, what is still open) and a proposed message which is a one line summary. Commit or branch only when the user asks.
 
 ## Agent skills
 

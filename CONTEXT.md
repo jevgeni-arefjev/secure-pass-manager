@@ -94,5 +94,9 @@ One security-relevant thing that happened to a vault, such as an unlock, a faile
 _Avoid_: log entry, audit entry (entry means a secret)
 
 **Diagnostic**:
-An operational warning printed to stderr, such as loose file permissions or memory that couldn't be locked; not an audit event and never written to the audit log.
-_Avoid_: calling it an audit event
+An operational log line for whoever runs the app, printed to stderr: a warning (such as loose file permissions or memory that couldn't be locked), the cause kind of an internal failure, or a web request line. It is not an audit event, is never written to the audit log, and never holds a field value, a master password, a path or a request URL.
+_Avoid_: calling it an audit event; log (on its own, ambiguous with the audit log)
+
+**Request log**:
+The diagnostics vault-web writes for each HTTP request: method, route template, status, latency and a short hash of the session.
+_Avoid_: access log
