@@ -1,5 +1,6 @@
 //! Turns secrets and audit events into terminal text: the `get` view, the `list` table,
-//! the `log` view and the problems of a refused save.
+//! the `log` view, the problems of a refused save and the cause kind of an internal
+//! failure.
 //!
 //! Security:
 //! - Every stored text is escaped before it reaches the terminal ([`escape`]): exactly
@@ -12,6 +13,7 @@
 //! - Output is returned in zeroizing strings, like the fields it is built from.
 
 use std::fmt::{Display, Write};
+use std::io::ErrorKind;
 
 use chrono::{TimeZone, Utc};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -20,6 +22,7 @@ use vault_core::session::{
     CustomFieldPart, FieldProblem, FieldValue, HiddenValue, InvalidSecret, Secret, SecretField,
     is_unsafe_char,
 };
+use vault_core::storage::LOCK_HELD_TOO_LONG;
 use zeroize::Zeroizing;
 
 /// What a masked hidden field looks like.
@@ -347,6 +350,30 @@ fn truncate(text: &str) -> Zeroizing<String> {
 /// ```
 fn pad(out: &mut String, n: usize) {
     out.extend(std::iter::repeat_n(' ', n));
+}
+
+/// The cause kind of an internal failure in words, as the CLI shows it after the
+/// generic message (ADR-0014): `vault storage failed (disk full)`. Only a fixed set of
+/// kinds is worded; any other is "unexpected file system error", with the exact kind
+/// only in the diagnostic.
+///
+/// Security: fixed text, never the OS error message (which can carry a path).
+///
+/// ```
+/// use std::io::ErrorKind;
+/// use vault_cli::render;
+/// assert_eq!(render::cause_kind(ErrorKind::StorageFull), "disk full");
+/// assert_eq!(render::cause_kind(ErrorKind::Interrupted), "unexpected file system error");
+/// ```
+#[must_use]
+pub fn cause_kind(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::StorageFull => "disk full",
+        ErrorKind::PermissionDenied => "permission denied",
+        ErrorKind::ReadOnlyFilesystem => "read-only file system",
+        LOCK_HELD_TOO_LONG => "vault is busy in another session",
+        _ => "unexpected file system error",
+    }
 }
 
 /// Every problem of a refused save, one per line under a heading, each labelled with

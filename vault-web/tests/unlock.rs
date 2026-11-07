@@ -602,3 +602,41 @@ async fn request_log_carries_a_session_hash_but_no_vaultname_password_cookie_or_
     assert_eq!(tag(&session_logs), tag(&lock_logs));
     assert_eq!(tag(&failed_logs), "-");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_storage_failure_on_unlock_is_a_generic_500_not_a_wrong_password() {
+    use std::os::unix::fs::PermissionsExt;
+
+    init_logging();
+    let app = TestApp::new();
+    app.create_vault("alice").await;
+    let vault_file = app.vault_home("alice").join("secrets.vault");
+    std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&vault_file).is_ok() {
+        // Root ignores permissions (as in CI's Fedora container): nothing to test.
+        return;
+    }
+
+    let (response, logs) = send_logged(
+        &app,
+        post_json("/api/unlock", &unlock_body("alice", PASSWORD)),
+    )
+    .await;
+    std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(set_cookie(&response).is_none());
+    assert_eq!(
+        body_json(response).await,
+        json!({"error": "internal error"})
+    );
+    let internal: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("internal_error"))
+        .collect();
+    assert_eq!(internal.len(), 1, "{logs}");
+    assert!(internal[0].contains("cause=\"storage\""), "{logs}");
+    assert!(internal[0].contains("kind=PermissionDenied"), "{logs}");
+    assert!(!logs.contains("alice"), "{logs}");
+}

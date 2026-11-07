@@ -7,7 +7,7 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
-> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s), and add, edit and delete secrets (an empty password is generated on the server; an edit keeps untouched hidden fields without the browser ever holding them; a refused save shows every invalid field at once). A settings page changes the master password (checked as it is typed; three wrong current master passwords in a row lock the session; a change locks the vault's other web sessions and reissues this one) and downloads a backup (the encrypted vault file as stored, `<vaultname>-r<revision>.vault`), and an audit log page shows the vault's audit events, newest first. Sessions end server-side: a sweeper locks idle sessions and every session 8 h after unlock, SIGINT/SIGTERM lock every session before exit, a panicking request gets a generic 500 and its session is locked, and an open tab returns to the unlock page once its session has ended.
+> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s), and add, edit and delete secrets (an empty password is generated on the server; an edit keeps untouched hidden fields without the browser ever holding them; a refused save shows every invalid field at once). A settings page changes the master password (checked as it is typed; three wrong current master passwords in a row lock the session; a change locks the vault's other web sessions and reissues this one) and downloads a backup (the encrypted vault file as stored, `<vaultname>-r<revision>.vault`), and an audit log page shows the vault's audit events, newest first. Sessions end server-side: a sweeper locks idle sessions and every session 8 h after unlock, SIGINT/SIGTERM lock every session before exit, a panicking request gets a generic 500 and its session is locked, and an open tab returns to the unlock page once its session has ended. Internal failures keep their cause kind (ADR-0014): the CLI shows it in words (`vault: vault storage failed (permission denied)`), and every web 500 except a panic (which has its own `panic` events) logs one `internal_error` line with what failed and its `io::ErrorKind`, never a path, vaultname or title.
 
 ## Roadmap
 
@@ -40,8 +40,8 @@ Course deliverables:
 ├── fixtures/               # unsafe-characters.json: unsafe characters and safe look-alikes, shared by the core, CLI and web client tests; audit-events.json: how each audit event kind is shown, shared by the CLI and web client tests
 ├── vault-core/             # shared library, no I/O front end
 │   ├── tests/crypto.rs     # encryption module behaviour, through its public API
-│   ├── tests/storage.rs    # storage module behaviour, through its public API: one size limit for load and save
-│   ├── tests/session.rs    # session module behaviour, through its public API
+│   ├── tests/storage.rs    # storage module behaviour, through its public API: one size limit for load and save, a lock held too long
+│   ├── tests/session.rs    # session module behaviour, through its public API, including the cause and kind of internal failures
 │   ├── tests/text_rules.rs # field text rules through Session: unsafe characters (shared fixture), limits in characters, trimming and NFC, title matching, URL forms, stored secrets breaking the rules
 │   ├── tests/field_checks.rs # per-field checks (`session::check`): each field on its own, normalised as a save would
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
@@ -61,7 +61,7 @@ Course deliverables:
 │       └── session/        # secret model + field validation (per-field checks in `check`, used by saves and by the vault shell as each answer is typed; every problem of a save reported at once; text rules: unsafe characters, trimming, NFC, URL forms), JSON body, master password policy, clock
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   ├── tests/args.rs       # command grammar and help text, through its public API
-│   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping against the shared fixture), through its public API
+│   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping against the shared fixture, cause kinds in words), through its public API
 │   ├── tests/shell.rs      # the CLI and vault shell end to end, on a scripted fake terminal
 │   └── src/
 │       ├── main.rs         # hardens the process, logs warnings to stderr, runs the CLI on the real terminal
@@ -78,11 +78,11 @@ Course deliverables:
 │   ├── assets/             # client bundle from `npm run build` in web/ (not committed)
 │   ├── tests/common/       # shared test helpers: test app on a temp vault directory with a manual (optionally panicking) clock, a gate clock holding a KDF slot, request builders, log capture
 │   ├── tests/app.rs        # the HTTP app in-process (tower `oneshot`): security headers, Host check, request logs, "client not built" page
-│   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, master password rules, KDF limiter (503; cheap create checks first), strict parsing, log contents
+│   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, master password rules, KDF limiter (503; cheap create checks first), strict parsing, log contents, a storage failure on unlock (generic 500 with an `internal_error` line, not a 401)
 │   ├── tests/secrets.rs    # list and detail: no hidden values, titles in URLs (percent-encoded, unusual characters), 404, one vault per session
 │   ├── tests/reveal.rs     # reveal: one hidden value per request, CSRF, 404 for unknown title/field, plain fields refused, audit event, nothing in logs
 │   ├── tests/expiry.rs     # sweeper (idle timeout, 8 h lifetime), activity keeping a session open, lock all on shutdown, panicking request (500, session locked)
-│   ├── tests/edit.rs       # add, edit, delete: generated password, 409 taken title, unchanged hidden values kept, no rename, every field problem of a refused secret listed (`fields`) and edge cases, strict parsing, CSRF, audit events, full vault (413, session stays open), save conflict locks (401)
+│   ├── tests/edit.rs       # add, edit, delete: generated password, 409 taken title, unchanged hidden values kept, no rename, every field problem of a refused secret listed (`fields`) and edge cases, strict parsing, CSRF, audit events, full vault (413, session stays open), save conflict locks (401), storage failure (generic 500, one `internal_error` log line)
 │   ├── tests/master_password.rs # change master password: new one only after, rules before the KDF, 503, wrong current one audited and the third in a row locks, other sessions locked, session reissued, CSRF, nothing in logs
 │   ├── tests/backup.rs     # backup download: the stored vault file byte for byte, file name with revision, audited, CSRF, locks after another session saved
 │   ├── tests/audit_log.rs  # audit log: newest first, limit (default 20, capped at 1000), unreadable lines marked, no field values, own vault only
@@ -95,7 +95,7 @@ Course deliverables:
 │       ├── args.rs         # flags: --bind, --vault-dir, --tls-cert/--tls-key
 │       ├── tls.rs          # rustls (ring) config from given PEM files or a cached self-signed localhost certificate (rcgen)
 │       ├── middleware.rs   # request log (method, route template, status, latency, session hash), panic catcher (generic 500, session locked), Host and Origin checks, security headers and CSP
-│       ├── api.rs          # `/api` routes and JSON errors (`{"error"}`, optional `"field"`; a refused secret lists every problem in `"fields"`)
+│       ├── api.rs          # `/api` routes and JSON errors (`{"error"}`, optional `"field"`; a refused secret lists every problem in `"fields"`; every 500 but a panic logs an `internal_error` line)
 │       ├── api/vault.rs    # POST /api/vaults (create), /api/unlock, /api/lock; GET /api/session
 │       ├── api/secrets.rs  # GET /api/secrets (list), /api/secrets/{title} (detail): hidden fields named, never sent; POST /api/secrets/{title}/reveal: one hidden field, audited
 │       ├── api/settings.rs # POST /api/master-password (KDF limiter, 3 wrong in a row lock, other sessions locked, session reissued), POST /api/backup (vault file as an attachment, audited)

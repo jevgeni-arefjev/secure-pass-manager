@@ -1,6 +1,7 @@
 //! Behaviour of the CLI's terminal output (`get` view, `list` table, `log` lines,
 //! escaping), tested only through its public API.
 
+use std::io::ErrorKind;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -9,7 +10,7 @@ use vault_cli::render::{self, Reveal};
 use vault_core::audit::{Event, Line, MemorySink, Record};
 use vault_core::crypto::MasterPassword;
 use vault_core::session::{CustomField, HiddenValue, Secret, Session, SessionConfig};
-use vault_core::storage::FileStore;
+use vault_core::storage::{FileStore, LOCK_HELD_TOO_LONG};
 
 /// Builds a hidden value from a literal.
 ///
@@ -355,5 +356,26 @@ fn audit_log_words_every_event_kind_as_the_shared_fixture() {
         seen,
         (0..14).collect::<Vec<_>>(),
         "one fixture case per kind"
+    );
+}
+
+#[test]
+fn cause_kinds_are_worded_for_the_person() {
+    assert_eq!(render::cause_kind(ErrorKind::StorageFull), "disk full");
+    assert_eq!(
+        render::cause_kind(ErrorKind::PermissionDenied),
+        "permission denied"
+    );
+    assert_eq!(
+        render::cause_kind(ErrorKind::ReadOnlyFilesystem),
+        "read-only file system"
+    );
+    assert_eq!(
+        render::cause_kind(LOCK_HELD_TOO_LONG),
+        "vault is busy in another session"
+    );
+    assert_eq!(
+        render::cause_kind(ErrorKind::NotFound),
+        "unexpected file system error"
     );
 }

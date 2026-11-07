@@ -12,6 +12,7 @@ mod settings;
 mod vault;
 
 use std::borrow::Cow;
+use std::io;
 
 use axum::Json;
 use axum::Router;
@@ -19,7 +20,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Serialize;
-use vault_core::session::SessionError;
+use vault_core::session::{InternalFailure, SessionError};
 
 use crate::kdf_limiter::KdfRejected;
 use crate::{AppState, auth};
@@ -189,7 +190,9 @@ impl ApiError {
     pub(crate) const STOPPING: Self =
         Self::fixed(StatusCode::SERVICE_UNAVAILABLE, "server is stopping");
 
-    /// Anything that went wrong on the server; details stay on the server.
+    /// Anything that went wrong on the server; details stay on the server. Handlers
+    /// answer it through [`internal_error`] or [`session_internal_error`], which log the
+    /// diagnostic; only a panic, logged by its own events, uses it directly.
     pub(crate) const INTERNAL: Self =
         Self::fixed(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
 
@@ -242,7 +245,7 @@ impl ApiError {
 }
 
 /// Maps a failure reading the vault: locked is 401 (ending the session in the browser),
-/// an unknown title 404, anything else a generic 500.
+/// an unknown title 404, anything else a generic 500 ([`session_internal_error`]).
 ///
 /// ```ignore
 /// current.with_live_vault(&state.sessions, f).map_err(read_error)?
@@ -251,11 +254,58 @@ pub(crate) fn read_error(err: SessionError) -> ApiError {
     match err {
         SessionError::Locked => ApiError::LOCKED,
         SessionError::SecretNotFound => ApiError::SECRET_NOT_FOUND,
-        _ => ApiError::INTERNAL,
+        err => session_internal_error(&err),
     }
 }
 
-/// Maps a KDF limiter refusal: 503 when busy, 500 if the job failed.
+/// The generic 500 for an internal failure (ADR-0014), after one
+/// `event = "internal_error"` diagnostic naming what failed (`cause`) and, if known,
+/// its file system cause kind (`kind`, an [`io::ErrorKind`] such as `StorageFull`).
+///
+/// Security: the diagnostic holds only these fixed names, never the vaultname, a path,
+/// a title or the OS error text, so the request log can't be linked to vaultnames.
+///
+/// ```ignore
+/// IssueRefused::Randomness => internal_error("randomness", None),
+/// ```
+pub(crate) fn internal_error(cause: &'static str, kind: Option<io::ErrorKind>) -> ApiError {
+    tracing::error!(
+        event = "internal_error",
+        cause,
+        kind = kind.map(tracing::field::debug),
+    );
+    ApiError::INTERNAL
+}
+
+/// The generic 500 for a session failure no handler expects ([`internal_failure_error`]).
+///
+/// Security: as [`internal_error`]; only the failure's fixed cause and kind are logged.
+///
+/// ```ignore
+/// _ => session_internal_error(&err),
+/// ```
+pub(crate) fn session_internal_error(err: &SessionError) -> ApiError {
+    internal_failure_error(err.internal_failure())
+}
+
+/// The generic 500 ([`internal_error`]) for `failure`, or with cause `unexpected` for
+/// an error that isn't an internal failure but reached a 500 anyway.
+///
+/// Security: as [`internal_error`]; only fixed names and a kind are logged.
+///
+/// ```ignore
+/// generator::generate_password(16).map_err(|err| internal_failure_error(err.internal_failure()))?
+/// ```
+pub(crate) fn internal_failure_error(failure: Option<InternalFailure>) -> ApiError {
+    let InternalFailure { cause, kind } = failure.unwrap_or(InternalFailure {
+        cause: "unexpected",
+        kind: None,
+    });
+    internal_error(cause, kind)
+}
+
+/// Maps a KDF limiter refusal: 503 when busy, 500 if the job panicked (cause `panic`;
+/// the panic hook logs where).
 ///
 /// ```ignore
 /// state.kdf.run(job).await.map_err(kdf_error)?
@@ -263,7 +313,7 @@ pub(crate) fn read_error(err: SessionError) -> ApiError {
 pub(crate) fn kdf_error(rejected: KdfRejected) -> ApiError {
     match rejected {
         KdfRejected::Busy => ApiError::BUSY,
-        KdfRejected::Failed => ApiError::INTERNAL,
+        KdfRejected::Failed => internal_error("panic", None),
     }
 }
 

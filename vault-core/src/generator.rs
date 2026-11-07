@@ -20,7 +20,7 @@ use std::fmt;
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::session::HiddenValue;
+use crate::session::{HiddenValue, InternalFailure};
 
 /// Length used when the person doesn't ask for one.
 pub const DEFAULT_PASSWORD_LENGTH: usize = 24;
@@ -81,6 +81,27 @@ impl fmt::Display for GeneratorError {
 }
 
 impl std::error::Error for GeneratorError {}
+
+impl GeneratorError {
+    /// The internal failure this error is (ADR-0014): `randomness` for a failed OS
+    /// random number generator, `None` for a length out of range (an input mistake).
+    ///
+    /// ```
+    /// use vault_core::generator::GeneratorError;
+    /// assert_eq!(GeneratorError::Randomness.internal_failure().map(|f| f.cause), Some("randomness"));
+    /// assert_eq!(GeneratorError::InvalidLength.internal_failure(), None);
+    /// ```
+    #[must_use]
+    pub fn internal_failure(&self) -> Option<InternalFailure> {
+        match self {
+            Self::Randomness => Some(InternalFailure {
+                cause: "randomness",
+                kind: None,
+            }),
+            Self::InvalidLength => None,
+        }
+    }
+}
 
 /// A random password of `length` visible ASCII characters with at least one lowercase
 /// letter, uppercase letter, digit and symbol.

@@ -119,7 +119,7 @@ pub fn run(
                 terminal.print(password.reveal());
                 Exit::Success
             }
-            Err(err) => fail(terminal, &err),
+            Err(err) => fail(terminal, err),
         },
         Command::Init(open) => open_vault(terminal, env, cli.vault_dir, &open, Opening::Create),
         Command::Unlock(open) => open_vault(terminal, env, cli.vault_dir, &open, Opening::Unlock),
@@ -162,13 +162,13 @@ fn usage_error(err: &clap::Error, terminal: &mut dyn Terminal) -> Exit {
     Exit::Usage
 }
 
-/// Prints `vault: <err>` to stderr and returns [`Exit::Failure`].
+/// Reports `err` ([`commands::report`]) and returns [`Exit::Failure`].
 ///
 /// ```ignore
-/// return fail(terminal, &SessionError::InvalidVaultname);
+/// return fail(terminal, SessionError::InvalidVaultname);
 /// ```
-fn fail(terminal: &mut dyn Terminal, err: &dyn std::fmt::Display) -> Exit {
-    terminal.print_error(&format!("vault: {err}"));
+fn fail(terminal: &mut dyn Terminal, err: impl Into<CommandError>) -> Exit {
+    commands::report(terminal, &err.into());
     Exit::Failure
 }
 
@@ -186,14 +186,12 @@ fn open_vault(
     opening: Opening,
 ) -> Exit {
     let Some(dir) = vault_dir.or_else(|| env.default_vault_dir.clone()) else {
-        return fail(
-            terminal,
-            &"no data directory found; pass --vault-dir <PATH>",
-        );
+        terminal.print_error("vault: no data directory found; pass --vault-dir <PATH>");
+        return Exit::Failure;
     };
     let store = match FileStore::new(&dir) {
         Ok(store) => store,
-        Err(err) => return fail(terminal, &err),
+        Err(err) => return fail(terminal, err),
     };
     let audit: Arc<dyn AuditSink> = Arc::new(FileSink::new(dir.clone()));
     // Surrounding spaces are trimmed by `Vaultname::parse`, as on the web.
@@ -201,11 +199,11 @@ fn open_vault(
         Some(name) => name.clone(),
         None => match terminal.read_line("Vaultname: ") {
             Ok(name) => String::from(name.as_str()),
-            Err(err) => return fail(terminal, &err),
+            Err(err) => return fail(terminal, err),
         },
     };
     let Ok(name) = Vaultname::parse(&vaultname) else {
-        return fail(terminal, &SessionError::InvalidVaultname);
+        return fail(terminal, SessionError::InvalidVaultname);
     };
     let idle_timeout = Duration::from_secs(open.idle_timeout * 60);
     let config = || SessionConfig {
@@ -240,9 +238,9 @@ fn create(
     match store.load(name) {
         Err(StorageError::NotFound) => {}
         Ok(_) | Err(StorageError::NotAVault) => {
-            return Err(fail(terminal, &SessionError::VaultExists));
+            return Err(fail(terminal, SessionError::VaultExists));
         }
-        Err(err) => return Err(fail(terminal, &err)),
+        Err(err) => return Err(fail(terminal, err)),
     }
     for _ in 0..MAX_ATTEMPTS {
         let password = match commands::new_master_password(terminal, "New master password: ") {
@@ -254,10 +252,10 @@ fn create(
                 terminal.print_error(&format!("vault: {err}"));
                 continue;
             }
-            Err(err) => return Err(fail(terminal, &err)),
+            Err(err) => return Err(fail(terminal, err)),
         };
         return Session::create(store.clone(), &name.to_string(), &password, config())
-            .map_err(|err| fail(terminal, &err));
+            .map_err(|err| fail(terminal, err));
     }
     Err(Exit::Failure)
 }
@@ -276,7 +274,7 @@ fn unlock(
     for _ in 0..MAX_ATTEMPTS {
         let mut typed = match terminal.read_hidden("Master password: ") {
             Ok(typed) => typed,
-            Err(err) => return Err(fail(terminal, &err)),
+            Err(err) => return Err(fail(terminal, err)),
         };
         let password = MasterPassword::new(std::mem::take(&mut *typed));
         match Session::unlock(store.clone(), vaultname, &password, config()) {
@@ -284,7 +282,7 @@ fn unlock(
             Err(SessionError::UnlockFailed) => {
                 terminal.print_error(&format!("vault: {}", SessionError::UnlockFailed));
             }
-            Err(err) => return Err(fail(terminal, &err)),
+            Err(err) => return Err(fail(terminal, err)),
         }
     }
     Err(Exit::Failure)
@@ -330,7 +328,7 @@ fn vault_shell(
             Ok(line) => line,
             Err(TerminalError::Interrupted) => continue,
             Err(TerminalError::EndOfInput) => break Exit::Success,
-            Err(err) => break fail(terminal, &err),
+            Err(err) => break fail(terminal, err),
         };
         let Some(words) = shlex::split(&line).map(zeroize::Zeroizing::new) else {
             terminal.print_error("vault: unbalanced quotes");
@@ -354,7 +352,7 @@ fn vault_shell(
             Ok(Flow::Continue) => {}
             Ok(Flow::Lock) => break Exit::Success,
             Err(err) => {
-                terminal.print_error(&format!("vault: {err}"));
+                commands::report(terminal, &err);
                 if err.ends_session() {
                     break Exit::Failure;
                 }

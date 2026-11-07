@@ -49,6 +49,7 @@ mod master_password_policy;
 mod secret;
 
 use std::fmt;
+use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -150,8 +151,10 @@ pub enum SessionError {
     VaultFull,
     /// The vault file, its header or its body isn't something this build can read.
     VaultUnreadable,
-    /// The file system or database failed.
-    Storage,
+    /// The file system failed, with the [`io::ErrorKind`] it failed with
+    /// ([`crate::storage::LOCK_HELD_TOO_LONG`] if another session held the vault's lock
+    /// too long).
+    Storage(io::ErrorKind),
     /// The OS random number generator failed.
     Randomness,
     /// The audit log couldn't be read.
@@ -181,7 +184,7 @@ impl fmt::Display for SessionError {
             Self::InvalidSecret(invalid) => invalid.fmt(f),
             Self::VaultFull => StorageError::VaultFull.fmt(f),
             Self::VaultUnreadable => f.write_str("vault file can't be read"),
-            Self::Storage => StorageError::Io.fmt(f),
+            Self::Storage(kind) => StorageError::Io(*kind).fmt(f),
             Self::Randomness => CryptoError::Randomness.fmt(f),
             Self::AuditLog => f.write_str("audit log can't be read"),
             Self::Backup(err) => err.fmt(f),
@@ -191,8 +194,75 @@ impl fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
+/// What an internal failure (ADR-0014) was, for a front end's diagnostic and, on the
+/// CLI, its message: a fixed name for what failed and its cause kind, where there is
+/// one.
+///
+/// Security: holds only fixed names and an [`io::ErrorKind`], never an OS message,
+/// path, vaultname or anything typed, so it is safe to log.
+///
+/// ```
+/// use std::io::ErrorKind;
+/// use vault_core::session::{InternalFailure, SessionError};
+/// assert_eq!(
+///     SessionError::Storage(ErrorKind::StorageFull).internal_failure(),
+///     Some(InternalFailure { cause: "storage", kind: Some(ErrorKind::StorageFull) })
+/// );
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InternalFailure {
+    /// What failed: `storage`, `backup`, `randomness`, `vault_unreadable` or
+    /// `audit_log`. A front end may add its own fixed names for failures of its own.
+    pub cause: &'static str,
+    /// The file system's cause kind, if the failure came from the file system.
+    pub kind: Option<io::ErrorKind>,
+}
+
+impl SessionError {
+    /// The internal failure this error is, or `None` for an input mistake, a security
+    /// refusal or an ended session (ADR-0014), which a front end reports by its message
+    /// alone.
+    ///
+    /// ```
+    /// # use vault_core::session::{InternalFailure, SessionError};
+    /// assert_eq!(SessionError::SecretNotFound.internal_failure(), None);
+    /// assert_eq!(
+    ///     SessionError::Randomness.internal_failure(),
+    ///     Some(InternalFailure { cause: "randomness", kind: None })
+    /// );
+    /// ```
+    #[must_use]
+    pub fn internal_failure(&self) -> Option<InternalFailure> {
+        let (cause, kind) = match self {
+            Self::Storage(kind) => ("storage", Some(*kind)),
+            Self::Backup(BackupError::Io(kind)) => ("backup", Some(*kind)),
+            Self::Backup(BackupError::Unverified) => ("backup", None),
+            Self::Randomness => ("randomness", None),
+            Self::VaultUnreadable => ("vault_unreadable", None),
+            Self::AuditLog => ("audit_log", None),
+            Self::UnlockFailed
+            | Self::InvalidVaultname
+            | Self::VaultExists
+            | Self::WeakMasterPassword(_)
+            | Self::Locked
+            | Self::Conflict
+            | Self::SecretNotFound
+            | Self::InvalidSecret(_)
+            | Self::VaultFull
+            | Self::Backup(
+                BackupError::NotAFilePath
+                | BackupError::NoDirectory
+                | BackupError::InsideVaultDirectory
+                | BackupError::Exists,
+            ) => return None,
+        };
+        Some(InternalFailure { cause, kind })
+    }
+}
+
 impl From<StorageError> for SessionError {
-    /// Maps a storage failure; `NotFound` outside unlock means the file vanished.
+    /// Maps a storage failure; `NotFound` outside unlock means the file vanished, and
+    /// becomes [`SessionError::Storage`] of [`io::ErrorKind::NotFound`].
     ///
     /// ```
     /// # use vault_core::{session::SessionError, storage::StorageError};
@@ -205,7 +275,8 @@ impl From<StorageError> for SessionError {
             StorageError::Conflict => Self::Conflict,
             StorageError::NotAVault => Self::VaultUnreadable,
             StorageError::VaultFull => Self::VaultFull,
-            StorageError::NotFound | StorageError::Io => Self::Storage,
+            StorageError::NotFound => Self::Storage(io::ErrorKind::NotFound),
+            StorageError::Io(kind) => Self::Storage(kind),
         }
     }
 }

@@ -4,6 +4,7 @@
 //! timeouts and unlock delays are checked without sleeping. Vaults are created in the
 //! test format (`create_insecure_for_tests`) so each Argon2id derivation stays fast.
 
+use std::io::ErrorKind;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,10 +14,11 @@ use proptest::prelude::*;
 use proptest::test_runner::TestRunner;
 use tempfile::TempDir;
 use vault_core::audit::{AuditError, AuditSink, Event, Line, MemorySink, Record};
+use vault_core::backup::BackupError;
 use vault_core::crypto::{self, Header, MasterPassword, Plaintext};
 use vault_core::session::{
     self, Clock, CustomField, CustomFieldPart, DEFAULT_IDLE_TIMEOUT, FieldProblem, FieldValue,
-    HiddenValue, Saved, Secret, SecretField, Session, SessionConfig, SessionError,
+    HiddenValue, InternalFailure, Saved, Secret, SecretField, Session, SessionConfig, SessionError,
     WeakMasterPassword,
 };
 use vault_core::storage::{FileStore, MAX_VAULT_FILE_LEN, VaultStore, Vaultname};
@@ -852,9 +854,12 @@ fn failed_write_leaves_secrets_unchanged() {
 
     assert_eq!(
         session.save(Secret::new("gitlab")),
-        Err(SessionError::Storage)
+        Err(SessionError::Storage(ErrorKind::NotFound))
     );
-    assert_eq!(session.remove("github"), Err(SessionError::Storage));
+    assert_eq!(
+        session.remove("github"),
+        Err(SessionError::Storage(ErrorKind::NotFound))
+    );
     assert!(session.is_unlocked());
     let titles: Vec<_> = session.list().unwrap().iter().map(|s| s.title()).collect();
     assert_eq!(titles, ["GitHub"]);
@@ -944,6 +949,73 @@ fn a_save_past_the_vault_size_limit_is_refused_and_changes_nothing() {
     session.lock();
     let mut session = fx.unlock("alice", PASSWORD).unwrap();
     assert_eq!(session.list().unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_vault_home_is_a_storage_failure_with_permission_denied() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fx = Fixture::new();
+    let mut session = fx.create();
+    let home = fx.dir.path().join("vaults/alice");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(home.join("probe"), b"").is_ok() {
+        // Root ignores permissions (as in CI's Fedora container): nothing to test.
+        return;
+    }
+
+    let err = session.save(Secret::new("GitHub")).unwrap_err();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(err, SessionError::Storage(ErrorKind::PermissionDenied));
+    assert_eq!(err.to_string(), "vault storage failed");
+    assert_eq!(
+        err.internal_failure(),
+        Some(InternalFailure {
+            cause: "storage",
+            kind: Some(ErrorKind::PermissionDenied),
+        })
+    );
+}
+
+#[test]
+fn internal_failures_name_their_cause_and_other_errors_have_none() {
+    let failure = |cause, kind| Some(InternalFailure { cause, kind });
+    assert_eq!(
+        SessionError::Storage(ErrorKind::StorageFull).internal_failure(),
+        failure("storage", Some(ErrorKind::StorageFull))
+    );
+    assert_eq!(
+        SessionError::Backup(BackupError::Io(ErrorKind::ReadOnlyFilesystem)).internal_failure(),
+        failure("backup", Some(ErrorKind::ReadOnlyFilesystem))
+    );
+    assert_eq!(
+        SessionError::Backup(BackupError::Unverified).internal_failure(),
+        failure("backup", None)
+    );
+    assert_eq!(
+        SessionError::Randomness.internal_failure(),
+        failure("randomness", None)
+    );
+    assert_eq!(
+        SessionError::VaultUnreadable.internal_failure(),
+        failure("vault_unreadable", None)
+    );
+    assert_eq!(
+        SessionError::AuditLog.internal_failure(),
+        failure("audit_log", None)
+    );
+    for err in [
+        SessionError::UnlockFailed,
+        SessionError::Locked,
+        SessionError::Conflict,
+        SessionError::SecretNotFound,
+        SessionError::VaultFull,
+        SessionError::Backup(BackupError::Exists),
+    ] {
+        assert_eq!(err.internal_failure(), None, "{err:?}");
+    }
 }
 
 #[test]
@@ -1133,8 +1205,9 @@ fn reveal_is_recorded_only_when_the_front_end_succeeds() {
         })
         .unwrap();
     assert_eq!(password, "p4ss-w0rd");
-    let failed: Result<(), SessionError> = session.reveal("github", |_| Err(SessionError::Storage));
-    assert_eq!(failed, Err(SessionError::Storage));
+    let failed: Result<(), SessionError> =
+        session.reveal("github", |_| Err(SessionError::Randomness));
+    assert_eq!(failed, Err(SessionError::Randomness));
     let missing: Result<(), SessionError> = session.reveal("nothing", |_| Ok(()));
     assert_eq!(missing, Err(SessionError::SecretNotFound));
 

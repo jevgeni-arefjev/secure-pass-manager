@@ -686,6 +686,32 @@ fn a_full_vault_refuses_a_save_and_the_shell_goes_on() {
     assert_eq!(t.out.last().unwrap(), "vault locked");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_storage_failure_is_shown_with_its_cause_kind() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fx = Fixture::with_alice();
+    let home = fx.dir.path().join("alice");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(home.join("probe"), b"").is_ok() {
+        // Root ignores permissions (as in CI's Fedora container): nothing to test.
+        return;
+    }
+    let mut script = vec![line("save github")];
+    script.extend(save_answers("alice", "s3cret!"));
+    script.push(line("lock"));
+
+    let (exit, t) = fx.shell(script);
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(exit, Exit::Success);
+    assert_eq!(
+        t.stderr(),
+        "vault: vault storage failed (permission denied)"
+    );
+}
+
 #[test]
 fn an_invalid_title_is_refused_before_any_field_prompt() {
     let fx = Fixture::with_alice();

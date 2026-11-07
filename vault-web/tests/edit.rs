@@ -755,3 +755,39 @@ async fn changes_log_neither_titles_nor_values() {
     }
     assert!(logs.contains("/api/secrets"), "{logs}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_storage_failure_is_a_generic_500_with_one_internal_error_line() {
+    use std::os::unix::fs::PermissionsExt;
+
+    init_logging();
+    let app = TestApp::new();
+    let alice = app.create_vault("alice").await;
+    let home = app.vault_home("alice");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(home.join("probe"), b"").is_ok() {
+        // Root ignores permissions (as in CI's Fedora container): nothing to test.
+        return;
+    }
+
+    let secret = json!({"title": "GitHub", "password": "s3cret-pa55"});
+    let (response, logs) = send_logged(&app, alice.post_json("/api/secrets", &secret)).await;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body_json(response).await,
+        json!({"error": "internal error"})
+    );
+    let internal: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("internal_error"))
+        .collect();
+    assert_eq!(internal.len(), 1, "{logs}");
+    assert!(internal[0].contains("cause=\"storage\""), "{logs}");
+    assert!(internal[0].contains("kind=PermissionDenied"), "{logs}");
+    for leak in ["alice", "GitHub", home.parent().unwrap().to_str().unwrap()] {
+        assert!(!logs.contains(leak), "{leak} in {logs}");
+    }
+}

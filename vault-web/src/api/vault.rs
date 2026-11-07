@@ -24,7 +24,7 @@ use vault_core::session::{
 };
 use vault_core::storage::{FileStore, Vaultname};
 
-use crate::api::{ApiError, kdf_error};
+use crate::api::{ApiError, internal_error, kdf_error, session_internal_error};
 use crate::auth::{self, CurrentSession};
 use crate::json::{MasterPasswordField, StrictJson};
 use crate::sessions::{IssueRefused, Issued, WebSession};
@@ -127,14 +127,16 @@ fn create_error(err: SessionError) -> ApiError {
             ApiError::field(error_field(&err), err.to_string())
         }
         SessionError::VaultExists => ApiError::VAULTNAME_TAKEN,
-        _ => ApiError::INTERNAL,
+        err => session_internal_error(&err),
     }
 }
 
 /// `POST /api/unlock`: unlocks a vault (200).
 ///
-/// Errors: 400 for a malformed body or an idle timeout out of range; otherwise every
-/// failure is the same 401 after at least [`MIN_UNLOCK_FAILURE`]; 503 when the KDF
+/// Errors: 400 for a malformed body or an idle timeout out of range; a wrong vaultname
+/// or master password (or an invalid vaultname) is the same 401 after at least
+/// [`MIN_UNLOCK_FAILURE`] ([`unlock_error`]); an internal failure (e.g. the vault file
+/// can't be read from disk) a generic 500, after the same delay; 503 when the KDF
 /// limiter is saturated or the server is stopping.
 ///
 /// ```text
@@ -169,8 +171,27 @@ pub(crate) async fn unlock(
         })
         .await
         .map_err(kdf_error)?;
-    let vault = unlocked.map_err(|_| ApiError::UNLOCK_FAILED)?;
+    let vault = unlocked.map_err(unlock_error)?;
     open_session(&state, &headers, vault, idle_timeout, StatusCode::OK)
+}
+
+/// Maps an unlock failure: the person's mistake (a wrong vaultname or master password,
+/// an invalid vaultname) is the one generic 401; anything else is the server's fault,
+/// a generic 500 with an `internal_error` diagnostic ([`session_internal_error`]).
+///
+/// Security: every refusal the person can cause looks the same, so vaultnames can't be
+/// probed. Only a fault on the server's side (an unreadable vault home, a vault file
+/// that isn't one) answers differently, as it must for the operator to notice it; the
+/// diagnostic never names the vaultname.
+///
+/// ```ignore
+/// let vault = unlocked.map_err(unlock_error)?;
+/// ```
+fn unlock_error(err: SessionError) -> ApiError {
+    match err {
+        SessionError::UnlockFailed | SessionError::InvalidVaultname => ApiError::UNLOCK_FAILED,
+        err => session_internal_error(&err),
+    }
 }
 
 /// `POST /api/lock`: locks the session, wipes its keys, deletes the cookie and tells
@@ -235,7 +256,7 @@ pub(super) fn issued_session(
     let (id, session) = issued.map_err(|refused| match refused {
         IssueRefused::Stopping => ApiError::STOPPING,
         IssueRefused::Ended => ApiError::LOCKED,
-        IssueRefused::Randomness => ApiError::INTERNAL,
+        IssueRefused::Randomness => internal_error("randomness", None),
     })?;
     let mut response = (
         status,
@@ -265,13 +286,15 @@ fn idle_timeout(minutes: Option<u64>) -> Result<Duration, ApiError> {
     }
 }
 
-/// The vault store on the configured vault directory.
+/// The vault store on the configured vault directory; a generic 500 if it can't be
+/// opened ([`session_internal_error`]).
 ///
 /// ```ignore
 /// let store = store(&state)?;
 /// ```
 fn store(state: &AppState) -> Result<FileStore, ApiError> {
-    FileStore::new(&state.config.vault_dir).map_err(|_| ApiError::INTERNAL)
+    FileStore::new(&state.config.vault_dir)
+        .map_err(|err| session_internal_error(&SessionError::from(err)))
 }
 
 /// A session config with `idle_timeout`, the app's clock and an audit log in each

@@ -23,10 +23,10 @@ use vault_core::backup::Destination;
 use vault_core::crypto::MasterPassword;
 use vault_core::generator::{self, DEFAULT_PASSWORD_LENGTH, GeneratorError};
 use vault_core::session::{
-    CustomField, FieldProblem, FieldValue, HiddenValue, Saved, Secret, Session, SessionError,
-    check, check_master_password,
+    CustomField, FieldProblem, FieldValue, HiddenValue, InternalFailure, Saved, Secret, Session,
+    SessionError, check, check_master_password,
 };
-use vault_core::storage::FileStore;
+use vault_core::storage::{FileStore, StorageError};
 use zeroize::Zeroizing;
 
 use crate::args::ShellCommand;
@@ -71,6 +71,24 @@ pub(crate) enum CommandError {
 }
 
 impl CommandError {
+    /// The internal failure this error is (ADR-0014), or `None` for any other class.
+    ///
+    /// ```ignore
+    /// let failure = CommandError::Generator(GeneratorError::Randomness).internal_failure();
+    /// assert_eq!(failure.map(|f| f.cause), Some("randomness"));
+    /// ```
+    fn internal_failure(&self) -> Option<InternalFailure> {
+        match self {
+            Self::Session(err) => err.internal_failure(),
+            Self::Generator(err) => err.internal_failure(),
+            Self::InvalidField(_)
+            | Self::Terminal(_)
+            | Self::NotATerminal
+            | Self::NoPassword
+            | Self::PasswordsDiffer => None,
+        }
+    }
+
     /// Whether the session is gone, so the shell must exit.
     ///
     /// ```ignore
@@ -82,29 +100,49 @@ impl CommandError {
             Self::Session(SessionError::Locked | SessionError::Conflict)
         )
     }
-}
 
-impl fmt::Display for CommandError {
-    /// Writes the fixed message for this error; a refused save lists every problem, one
-    /// per line ([`render::invalid_secret`]).
+    /// Writes the fixed message alone, without a cause kind.
     ///
     /// ```ignore
-    /// assert_eq!(CommandError::PasswordsDiffer.to_string(), "master passwords don't match");
+    /// self.write_message(f)?;
     /// ```
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn write_message(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Session(SessionError::InvalidSecret(invalid)) => {
                 f.write_str(&render::invalid_secret(invalid))
             }
-            Self::Session(err) => err.fmt(f),
+            Self::Session(err) => fmt::Display::fmt(err, f),
             Self::InvalidField(problem) => f.write_str(&render::refused_field(problem)),
-            Self::Terminal(err) => err.fmt(f),
-            Self::Generator(err) => err.fmt(f),
+            Self::Terminal(err) => fmt::Display::fmt(err, f),
+            Self::Generator(err) => fmt::Display::fmt(err, f),
             Self::NotATerminal => {
                 f.write_str("hidden fields are only shown on a terminal, not into a pipe or file")
             }
             Self::NoPassword => f.write_str("this secret has no password to copy"),
             Self::PasswordsDiffer => f.write_str("master passwords don't match"),
+        }
+    }
+}
+
+impl fmt::Display for CommandError {
+    /// Writes the fixed message for this error; a refused save lists every problem, one
+    /// per line ([`render::invalid_secret`]), and an internal failure from the file
+    /// system ends with its cause kind in words ([`render::cause_kind`]).
+    ///
+    /// ```ignore
+    /// assert_eq!(CommandError::PasswordsDiffer.to_string(), "master passwords don't match");
+    /// assert_eq!(
+    ///     CommandError::Session(SessionError::Storage(ErrorKind::StorageFull)).to_string(),
+    ///     "vault storage failed (disk full)"
+    /// );
+    /// ```
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_message(f)?;
+        match self.internal_failure() {
+            Some(InternalFailure {
+                kind: Some(kind), ..
+            }) => write!(f, " ({})", render::cause_kind(kind)),
+            _ => Ok(()),
         }
     }
 }
@@ -117,6 +155,17 @@ impl From<SessionError> for CommandError {
     /// ```
     fn from(err: SessionError) -> Self {
         Self::Session(err)
+    }
+}
+
+impl From<StorageError> for CommandError {
+    /// Wraps a storage failure as the session failure it stands for.
+    ///
+    /// ```ignore
+    /// let err = CommandError::from(StorageError::Io(ErrorKind::StorageFull));
+    /// ```
+    fn from(err: StorageError) -> Self {
+        Self::Session(err.into())
     }
 }
 
@@ -140,6 +189,26 @@ impl From<GeneratorError> for CommandError {
     fn from(err: GeneratorError) -> Self {
         Self::Generator(err)
     }
+}
+
+/// Prints `vault: <err>` to stderr. An internal failure (ADR-0014) also gets an
+/// `event = "internal_error"` diagnostic with its cause and kind.
+///
+/// Security: the diagnostic holds only fixed names and an [`std::io::ErrorKind`], never
+/// a path, the vaultname or anything typed.
+///
+/// ```ignore
+/// commands::report(terminal, &CommandError::from(SessionError::Locked));
+/// ```
+pub(crate) fn report(terminal: &mut dyn Terminal, err: &CommandError) {
+    if let Some(failure) = err.internal_failure() {
+        tracing::error!(
+            event = "internal_error",
+            cause = failure.cause,
+            kind = failure.kind.map(tracing::field::debug),
+        );
+    }
+    terminal.print_error(&format!("vault: {err}"));
 }
 
 /// Runs one vault shell command. `vault_dir` is the vault directory the session's

@@ -28,9 +28,9 @@ use vault_core::session::{
 use vault_core::storage::FileStore;
 
 use crate::AppState;
-use crate::api::read_error;
 use crate::api::secrets::SecretDetail;
 use crate::api::{ApiError, FieldError};
+use crate::api::{internal_failure_error, read_error};
 use crate::auth::CurrentSession;
 use crate::json::StrictJson;
 
@@ -178,7 +178,7 @@ impl SecretRequest {
             Some(HiddenInput::Value(value)) if !value.reveal().is_empty() => (value, false),
             None | Some(HiddenInput::Value(_)) => (
                 generator::generate_password(DEFAULT_PASSWORD_LENGTH)
-                    .map_err(|_| ApiError::INTERNAL)?,
+                    .map_err(|err| internal_failure_error(err.internal_failure()))?,
                 true,
             ),
             Some(HiddenInput::Unchanged) => {

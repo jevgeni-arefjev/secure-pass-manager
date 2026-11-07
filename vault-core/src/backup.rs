@@ -67,8 +67,9 @@ pub enum BackupError {
     /// The written copy didn't read back as the vault, or didn't open with the
     /// session's vault key. Nothing was put at the path.
     Unverified,
-    /// The file system failed.
-    Io,
+    /// The file system failed, with the [`io::ErrorKind`] it failed with (never the OS
+    /// message, which can carry the path).
+    Io(io::ErrorKind),
 }
 
 impl fmt::Display for BackupError {
@@ -76,7 +77,10 @@ impl fmt::Display for BackupError {
     ///
     /// ```
     /// # use vault_core::backup::BackupError;
-    /// assert_eq!(BackupError::Io.to_string(), "backup could not be written");
+    /// assert_eq!(
+    ///     BackupError::Io(std::io::ErrorKind::StorageFull).to_string(),
+    ///     "backup could not be written"
+    /// );
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -87,7 +91,7 @@ impl fmt::Display for BackupError {
                 "something already exists at the backup path; a backup never overwrites"
             }
             Self::Unverified => "the backup didn't verify; nothing was written",
-            Self::Io => "backup could not be written",
+            Self::Io(_) => "backup could not be written",
         })
     }
 }
@@ -152,9 +156,9 @@ impl Destination {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 return Err(BackupError::NoDirectory);
             }
-            Err(_) => return Err(BackupError::Io),
+            Err(err) => return Err(BackupError::Io(err.kind())),
         };
-        let vault_dir = fs::canonicalize(vault_dir).map_err(|_| BackupError::Io)?;
+        let vault_dir = fs::canonicalize(vault_dir).map_err(|err| BackupError::Io(err.kind()))?;
         if dir.starts_with(&vault_dir) {
             return Err(BackupError::InsideVaultDirectory);
         }
@@ -162,7 +166,7 @@ impl Destination {
         match fs::symlink_metadata(&path) {
             Ok(_) => Err(BackupError::Exists),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self { dir, path }),
-            Err(_) => Err(BackupError::Io),
+            Err(err) => Err(BackupError::Io(err.kind())),
         }
     }
 }
@@ -188,8 +192,8 @@ pub(crate) struct Staged {
 /// let staged = backup::stage(&dest, &sealed)?;
 /// ```
 pub(crate) fn stage(dest: &Destination, sealed: &SealedVault) -> Result<Staged, BackupError> {
-    let temp =
-        storage::write_temp_named(&dest.dir, TEMP_PREFIX, sealed).map_err(|_| BackupError::Io)?;
+    let temp = storage::write_temp_named(&dest.dir, TEMP_PREFIX, sealed)
+        .map_err(|err| BackupError::Io(err.kind()))?;
     Ok(Staged {
         temp,
         dest: dest.clone(),
@@ -221,7 +225,7 @@ impl Staged {
             .persist_noclobber(&self.dest.path)
             .map_err(|err| match err.error.kind() {
                 io::ErrorKind::AlreadyExists => BackupError::Exists,
-                _ => BackupError::Io,
+                kind => BackupError::Io(kind),
             })?;
         storage::sync_dir_after_commit(&self.dest.dir);
         Ok(())

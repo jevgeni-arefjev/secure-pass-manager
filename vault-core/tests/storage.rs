@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use vault_core::crypto::{self, Header, MasterPassword, Plaintext, SealedVault, VaultKey};
-use vault_core::storage::{FileStore, MAX_VAULT_FILE_LEN, StorageError, VaultStore, Vaultname};
+use vault_core::storage::{
+    FileStore, LOCK_HELD_TOO_LONG, MAX_VAULT_FILE_LEN, StorageError, VaultStore, Vaultname,
+};
 
 /// A store in a fresh temporary vault directory; keep the `TempDir` alive for the test.
 ///
@@ -480,6 +482,21 @@ fn save_waits_for_a_held_lock() {
     assert_eq!(store.load(&name("alice")).unwrap(), v1);
 }
 
+#[test]
+fn save_gives_up_on_a_lock_held_too_long_as_busy() {
+    let (dir, store) = store();
+    let (key, v0) = new_vault("v0");
+    store.create(&name("alice"), &v0).unwrap();
+    let lock = std::fs::File::create(lock_path(&dir, "alice")).unwrap();
+    lock.lock().unwrap();
+
+    let result = store.save(&name("alice"), &next(&key, &v0, "v1"));
+
+    assert_eq!(result, Err(StorageError::Io(LOCK_HELD_TOO_LONG)));
+    assert_eq!(LOCK_HELD_TOO_LONG, std::io::ErrorKind::TimedOut);
+    assert_eq!(store.load(&name("alice")).unwrap(), v0);
+}
+
 // --- Files that aren't vaults ---
 
 #[test]
@@ -728,10 +745,10 @@ mod permissions {
         let elsewhere = dir.path().join("elsewhere");
         std::os::unix::fs::symlink(&elsewhere, lock_path(&dir, "alice")).unwrap();
 
-        assert_eq!(
-            store.save(&name("alice"), &next(&key, &v0, "v1")).err(),
-            Some(StorageError::Io)
-        );
+        assert!(matches!(
+            store.save(&name("alice"), &next(&key, &v0, "v1")),
+            Err(StorageError::Io(_))
+        ));
         assert!(!elsewhere.exists());
         assert_eq!(store.load(&name("alice")).unwrap(), v0);
     }

@@ -103,9 +103,20 @@ pub enum StorageError {
     /// Writing would make the vault file larger than [`MAX_VAULT_FILE_LEN`], so it
     /// couldn't be opened again. Nothing was written.
     VaultFull,
-    /// The file system failed, or another session held the lock for too long.
-    Io,
+    /// The file system failed, with the [`io::ErrorKind`] it failed with (never the OS
+    /// message, which can carry a path). Another session holding the lock for longer
+    /// than a save waits is [`io::ErrorKind::TimedOut`] ([`LOCK_HELD_TOO_LONG`]).
+    Io(io::ErrorKind),
 }
+
+/// The cause kind of a save that gave up waiting for another session's lock.
+///
+/// ```
+/// use vault_core::storage::{LOCK_HELD_TOO_LONG, StorageError};
+/// let busy = StorageError::Io(LOCK_HELD_TOO_LONG);
+/// assert_eq!(busy.to_string(), "vault storage failed");
+/// ```
+pub const LOCK_HELD_TOO_LONG: io::ErrorKind = io::ErrorKind::TimedOut;
 
 impl fmt::Display for StorageError {
     /// Writes the fixed message for this error.
@@ -124,7 +135,7 @@ impl fmt::Display for StorageError {
             Self::Conflict => "vault was changed by another session",
             Self::NotAVault => "not a vault file",
             Self::VaultFull => "vault is full",
-            Self::Io => "vault storage failed",
+            Self::Io(_) => "vault storage failed",
         })
     }
 }
@@ -235,7 +246,7 @@ impl FileStore {
         create_private_dir(&dir).map_err(io_error)?;
         let metadata = fs::metadata(&dir).map_err(io_error)?;
         if !metadata.is_dir() {
-            return Err(StorageError::Io);
+            return Err(StorageError::Io(io::ErrorKind::NotADirectory));
         }
         if is_loosely_permitted(&metadata) {
             tracing::warn!(event = "vault_directory_permissions_loose");
@@ -331,7 +342,7 @@ impl FileStore {
             if err.kind() == io::ErrorKind::UnexpectedEof {
                 StorageError::NotAVault
             } else {
-                StorageError::Io
+                io_error(err)
             }
         })?;
         Header::decode(&header)
@@ -366,7 +377,7 @@ impl VaultStore for FileStore {
             if err.kind() == io::ErrorKind::AlreadyExists {
                 StorageError::AlreadyExists
             } else {
-                StorageError::Io
+                io_error(err)
             }
         })?;
         // The vault now exists: from here on, failing would misreport what happened.
@@ -613,7 +624,7 @@ fn remove_stale_temps(home: &Path) {
 
 /// Takes the exclusive lock on the vault home's `secrets.lock`, creating the file if
 /// needed, and returns it; the lock is held until the file is dropped. Retries for up
-/// to [`LOCK_TIMEOUT`], then fails with [`StorageError::Io`].
+/// to [`LOCK_TIMEOUT`], then fails with [`StorageError::Io`] of [`LOCK_HELD_TOO_LONG`].
 ///
 /// Security: the lock file is created `0600` (Unix) and opened with `O_NOFOLLOW`, so a
 /// planted symlink can't make a save create or lock a file elsewhere.
@@ -628,7 +639,7 @@ fn lock_vault_home(home: &Path) -> Result<File, StorageError> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let file = open_no_follow(&options, &home.join(LOCK_FILE)).map_err(io_error)?;
     if !file.metadata().map_err(io_error)?.is_file() {
-        return Err(StorageError::Io);
+        return Err(StorageError::Io(io::ErrorKind::InvalidInput));
     }
     let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
@@ -637,7 +648,8 @@ fn lock_vault_home(home: &Path) -> Result<File, StorageError> {
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                 thread::sleep(LOCK_RETRY);
             }
-            Err(_) => return Err(StorageError::Io),
+            Err(TryLockError::WouldBlock) => return Err(StorageError::Io(LOCK_HELD_TOO_LONG)),
+            Err(TryLockError::Error(err)) => return Err(io_error(err)),
         }
     }
 }
@@ -655,14 +667,14 @@ pub(crate) fn open_no_follow(options: &OpenOptions, path: &Path) -> io::Result<F
     options.open(path)
 }
 
-/// Maps a file system error to [`StorageError::Io`], dropping its message (which may
-/// contain a path).
+/// Maps a file system error to [`StorageError::Io`], keeping only its kind and
+/// dropping its message (which may contain a path).
 ///
 /// ```ignore
 /// fs::metadata(&dir).map_err(io_error)?;
 /// ```
-pub(crate) fn io_error(_: io::Error) -> StorageError {
-    StorageError::Io
+pub(crate) fn io_error(err: io::Error) -> StorageError {
+    StorageError::Io(err.kind())
 }
 
 /// Creates `dir` and any missing parents, `0700` on Unix. An existing directory is
