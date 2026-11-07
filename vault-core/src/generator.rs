@@ -20,7 +20,7 @@ use std::fmt;
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::session::{HiddenValue, InternalFailure};
+use crate::session::{HiddenValue, InternalCause, InternalFailure};
 
 /// Length used when the person doesn't ask for one.
 pub const DEFAULT_PASSWORD_LENGTH: usize = 24;
@@ -87,15 +87,18 @@ impl GeneratorError {
     /// random number generator, `None` for a length out of range (an input mistake).
     ///
     /// ```
-    /// use vault_core::generator::GeneratorError;
-    /// assert_eq!(GeneratorError::Randomness.internal_failure().map(|f| f.cause), Some("randomness"));
+    /// use vault_core::{generator::GeneratorError, session::InternalCause};
+    /// assert_eq!(
+    ///     GeneratorError::Randomness.internal_failure().map(|f| f.cause),
+    ///     Some(InternalCause::Randomness)
+    /// );
     /// assert_eq!(GeneratorError::InvalidLength.internal_failure(), None);
     /// ```
     #[must_use]
     pub fn internal_failure(&self) -> Option<InternalFailure> {
         match self {
             Self::Randomness => Some(InternalFailure {
-                cause: "randomness",
+                cause: InternalCause::Randomness,
                 kind: None,
             }),
             Self::InvalidLength => None,

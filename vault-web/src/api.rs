@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Serialize;
-use vault_core::session::{InternalFailure, SessionError};
+use vault_core::session::{InternalCause, InternalFailure, SessionError};
 
 use crate::kdf_limiter::KdfRejected;
 use crate::{AppState, auth};
@@ -258,20 +258,68 @@ pub(crate) fn read_error(err: SessionError) -> ApiError {
     }
 }
 
+/// What failed, as the `cause` of an `internal_error` diagnostic (ADR-0014): an
+/// internal failure from `vault-core` or one of the server's own.
+///
+/// ```ignore
+/// internal_error(Cause::ResponseHeader, None)
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// An internal failure from `vault-core`, logged by its own name.
+    Core(InternalCause),
+    /// A KDF job panicked on the blocking pool (`panic`; the panic hook logs where).
+    Panic,
+    /// A response header couldn't be built (`response_header`).
+    ResponseHeader,
+    /// An error that isn't an internal failure reached a 500 anyway (`unexpected`).
+    Unexpected,
+}
+
+impl Cause {
+    /// The fixed name logged as the diagnostic's `cause`.
+    ///
+    /// Security: fixed text, safe to log.
+    ///
+    /// ```ignore
+    /// assert_eq!(Cause::Core(InternalCause::Storage).name(), "storage");
+    /// ```
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Core(cause) => cause.name(),
+            Self::Panic => "panic",
+            Self::ResponseHeader => "response_header",
+            Self::Unexpected => "unexpected",
+        }
+    }
+}
+
+impl From<InternalCause> for Cause {
+    /// Wraps a core cause.
+    ///
+    /// ```ignore
+    /// internal_error(InternalCause::Randomness, None)
+    /// ```
+    fn from(cause: InternalCause) -> Self {
+        Self::Core(cause)
+    }
+}
+
 /// The generic 500 for an internal failure (ADR-0014), after one
-/// `event = "internal_error"` diagnostic naming what failed (`cause`) and, if known,
-/// its file system cause kind (`kind`, an [`io::ErrorKind`] such as `StorageFull`).
+/// `event = "internal_error"` diagnostic naming what failed (`cause`, see [`Cause`])
+/// and, if known, its file system cause kind (`kind`, an [`io::ErrorKind`] such as
+/// `StorageFull`).
 ///
 /// Security: the diagnostic holds only these fixed names, never the vaultname, a path,
 /// a title or the OS error text, so the request log can't be linked to vaultnames.
 ///
 /// ```ignore
-/// IssueRefused::Randomness => internal_error("randomness", None),
+/// IssueRefused::Randomness => internal_error(InternalCause::Randomness, None),
 /// ```
-pub(crate) fn internal_error(cause: &'static str, kind: Option<io::ErrorKind>) -> ApiError {
+pub(crate) fn internal_error(cause: impl Into<Cause>, kind: Option<io::ErrorKind>) -> ApiError {
     tracing::error!(
         event = "internal_error",
-        cause,
+        cause = cause.into().name(),
         kind = kind.map(tracing::field::debug),
     );
     ApiError::INTERNAL
@@ -288,8 +336,8 @@ pub(crate) fn session_internal_error(err: &SessionError) -> ApiError {
     internal_failure_error(err.internal_failure())
 }
 
-/// The generic 500 ([`internal_error`]) for `failure`, or with cause `unexpected` for
-/// an error that isn't an internal failure but reached a 500 anyway.
+/// The generic 500 ([`internal_error`]) for `failure`, or with [`Cause::Unexpected`]
+/// for an error that isn't an internal failure but reached a 500 anyway.
 ///
 /// Security: as [`internal_error`]; only fixed names and a kind are logged.
 ///
@@ -297,15 +345,14 @@ pub(crate) fn session_internal_error(err: &SessionError) -> ApiError {
 /// generator::generate_password(16).map_err(|err| internal_failure_error(err.internal_failure()))?
 /// ```
 pub(crate) fn internal_failure_error(failure: Option<InternalFailure>) -> ApiError {
-    let InternalFailure { cause, kind } = failure.unwrap_or(InternalFailure {
-        cause: "unexpected",
-        kind: None,
-    });
-    internal_error(cause, kind)
+    match failure {
+        Some(InternalFailure { cause, kind }) => internal_error(cause, kind),
+        None => internal_error(Cause::Unexpected, None),
+    }
 }
 
-/// Maps a KDF limiter refusal: 503 when busy, 500 if the job panicked (cause `panic`;
-/// the panic hook logs where).
+/// Maps a KDF limiter refusal: 503 when busy, 500 if the job panicked
+/// ([`Cause::Panic`]; the panic hook logs where).
 ///
 /// ```ignore
 /// state.kdf.run(job).await.map_err(kdf_error)?
@@ -313,7 +360,7 @@ pub(crate) fn internal_failure_error(failure: Option<InternalFailure>) -> ApiErr
 pub(crate) fn kdf_error(rejected: KdfRejected) -> ApiError {
     match rejected {
         KdfRejected::Busy => ApiError::BUSY,
-        KdfRejected::Failed => internal_error("panic", None),
+        KdfRejected::Failed => internal_error(Cause::Panic, None),
     }
 }
 

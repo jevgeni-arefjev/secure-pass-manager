@@ -7,6 +7,7 @@
 pub mod args;
 pub mod clipboard;
 mod commands;
+pub mod diagnostics;
 pub mod render;
 pub mod shell;
 pub mod terminal;

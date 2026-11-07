@@ -75,7 +75,7 @@ impl CommandError {
     ///
     /// ```ignore
     /// let failure = CommandError::Generator(GeneratorError::Randomness).internal_failure();
-    /// assert_eq!(failure.map(|f| f.cause), Some("randomness"));
+    /// assert_eq!(failure.map(|f| f.cause), Some(InternalCause::Randomness));
     /// ```
     fn internal_failure(&self) -> Option<InternalFailure> {
         match self {
@@ -204,7 +204,7 @@ pub(crate) fn report(terminal: &mut dyn Terminal, err: &CommandError) {
     if let Some(failure) = err.internal_failure() {
         tracing::error!(
             event = "internal_error",
-            cause = failure.cause,
+            cause = failure.cause.name(),
             kind = failure.kind.map(tracing::field::debug),
         );
     }

@@ -194,6 +194,49 @@ impl fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
+/// What failed in an internal failure (ADR-0014). Its [`name`](Self::name) is the
+/// `cause` of an `internal_error` diagnostic; a front end adds its own causes for
+/// failures of its own (e.g. a panic on the web).
+///
+/// ```
+/// use vault_core::session::InternalCause;
+/// assert_eq!(InternalCause::VaultUnreadable.name(), "vault_unreadable");
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InternalCause {
+    /// Reading or writing the vault file or its vault home.
+    Storage,
+    /// Writing or verifying a backup.
+    Backup,
+    /// The OS random number generator.
+    Randomness,
+    /// A vault file, header or body this build can't read.
+    VaultUnreadable,
+    /// Reading the audit log.
+    AuditLog,
+}
+
+impl InternalCause {
+    /// The fixed name logged as the diagnostic's `cause`.
+    ///
+    /// Security: fixed text, safe to log.
+    ///
+    /// ```
+    /// # use vault_core::session::InternalCause;
+    /// assert_eq!(InternalCause::AuditLog.name(), "audit_log");
+    /// ```
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Backup => "backup",
+            Self::Randomness => "randomness",
+            Self::VaultUnreadable => "vault_unreadable",
+            Self::AuditLog => "audit_log",
+        }
+    }
+}
+
 /// What an internal failure (ADR-0014) was, for a front end's diagnostic and, on the
 /// CLI, its message: a fixed name for what failed and its cause kind, where there is
 /// one.
@@ -203,17 +246,16 @@ impl std::error::Error for SessionError {}
 ///
 /// ```
 /// use std::io::ErrorKind;
-/// use vault_core::session::{InternalFailure, SessionError};
+/// use vault_core::session::{InternalCause, InternalFailure, SessionError};
 /// assert_eq!(
 ///     SessionError::Storage(ErrorKind::StorageFull).internal_failure(),
-///     Some(InternalFailure { cause: "storage", kind: Some(ErrorKind::StorageFull) })
+///     Some(InternalFailure { cause: InternalCause::Storage, kind: Some(ErrorKind::StorageFull) })
 /// );
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InternalFailure {
-    /// What failed: `storage`, `backup`, `randomness`, `vault_unreadable` or
-    /// `audit_log`. A front end may add its own fixed names for failures of its own.
-    pub cause: &'static str,
+    /// What failed.
+    pub cause: InternalCause,
     /// The file system's cause kind, if the failure came from the file system.
     pub kind: Option<io::ErrorKind>,
 }
@@ -224,22 +266,22 @@ impl SessionError {
     /// alone.
     ///
     /// ```
-    /// # use vault_core::session::{InternalFailure, SessionError};
+    /// # use vault_core::session::{InternalCause, InternalFailure, SessionError};
     /// assert_eq!(SessionError::SecretNotFound.internal_failure(), None);
     /// assert_eq!(
     ///     SessionError::Randomness.internal_failure(),
-    ///     Some(InternalFailure { cause: "randomness", kind: None })
+    ///     Some(InternalFailure { cause: InternalCause::Randomness, kind: None })
     /// );
     /// ```
     #[must_use]
     pub fn internal_failure(&self) -> Option<InternalFailure> {
         let (cause, kind) = match self {
-            Self::Storage(kind) => ("storage", Some(*kind)),
-            Self::Backup(BackupError::Io(kind)) => ("backup", Some(*kind)),
-            Self::Backup(BackupError::Unverified) => ("backup", None),
-            Self::Randomness => ("randomness", None),
-            Self::VaultUnreadable => ("vault_unreadable", None),
-            Self::AuditLog => ("audit_log", None),
+            Self::Storage(kind) => (InternalCause::Storage, Some(*kind)),
+            Self::Backup(BackupError::Io(kind)) => (InternalCause::Backup, Some(*kind)),
+            Self::Backup(BackupError::Unverified) => (InternalCause::Backup, None),
+            Self::Randomness => (InternalCause::Randomness, None),
+            Self::VaultUnreadable => (InternalCause::VaultUnreadable, None),
+            Self::AuditLog => (InternalCause::AuditLog, None),
             Self::UnlockFailed
             | Self::InvalidVaultname
             | Self::VaultExists

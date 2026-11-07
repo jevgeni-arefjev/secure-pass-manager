@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,10 +23,12 @@ use zeroize::Zeroizing;
 
 const PASSWORD: &str = "correct horse battery";
 
-/// A clock that only moves when told to (sleeping moves it too).
+/// A clock that only moves when told to (sleeping moves it too), and panics once
+/// `panicking` is set.
 struct ManualClock {
     start: Instant,
     elapsed: Mutex<Duration>,
+    panicking: AtomicBool,
 }
 
 impl ManualClock {
@@ -41,6 +44,10 @@ impl ManualClock {
 
 impl Clock for ManualClock {
     fn now(&self) -> Instant {
+        assert!(
+            !self.panicking.load(Ordering::SeqCst),
+            "scripted clock panic"
+        );
         self.start + *self.elapsed.lock().unwrap()
     }
 
@@ -65,6 +72,10 @@ enum Input {
     HiddenRefused(TerminalError),
     /// Leave the shell idle for this long, then wait until it reports the auto-lock.
     Idle(Duration),
+    /// The terminal panics, standing in for a bug anywhere in the vault shell.
+    Panic,
+    /// The clock starts panicking; wait until the auto-lock watcher reports it.
+    ClockPanics,
 }
 
 /// What background threads saw: notices above the prompt and the clipboard.
@@ -127,14 +138,27 @@ impl FakeTerminal {
             match self.inputs.pop_front()? {
                 Input::Idle(duration) => {
                     self.clock.advance(duration);
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    while self.shared.notices.lock().unwrap().is_empty() {
-                        assert!(Instant::now() < deadline, "auto-lock never fired");
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
+                    self.wait_for_notice();
+                }
+                Input::ClockPanics => {
+                    self.clock.panicking.store(true, Ordering::SeqCst);
+                    self.wait_for_notice();
                 }
                 input => return Some(input),
             }
+        }
+    }
+
+    /// Waits until the auto-lock watcher has said something above the prompt.
+    ///
+    /// ```text
+    /// self.wait_for_notice();
+    /// ```
+    fn wait_for_notice(&self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.shared.notices.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "auto-lock never fired");
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -151,6 +175,8 @@ impl FakeTerminal {
             }
             Some(Input::Interrupt) => Err(TerminalError::Interrupted),
             Some(Input::Idle(_)) => unreachable!("handled in next"),
+            Some(Input::Panic) => panic!("scripted panic"),
+            Some(Input::ClockPanics) => unreachable!("handled in next"),
             None => Err(TerminalError::EndOfInput),
         }
     }
@@ -200,6 +226,8 @@ impl Terminal for FakeTerminal {
             Some(Input::Line(line)) => panic!("visible line {line:?} read through hidden prompt"),
             Some(Input::Interrupt) => Err(TerminalError::Interrupted),
             Some(Input::Idle(_)) => unreachable!("handled in next"),
+            Some(Input::Panic) => panic!("scripted panic"),
+            Some(Input::ClockPanics) => unreachable!("handled in next"),
             None => Err(TerminalError::EndOfInput),
         }
     }
@@ -245,6 +273,7 @@ impl Fixture {
             clock: Arc::new(ManualClock {
                 start: Instant::now(),
                 elapsed: Mutex::new(Duration::ZERO),
+                panicking: AtomicBool::new(false),
             }),
         }
     }
@@ -1052,6 +1081,47 @@ fn auto_lock_clears_the_clipboard() {
     ];
     let (_, t) = fx.shell(with_github(then));
     assert_eq!(t.clipboard(), None);
+}
+
+#[test]
+fn a_panic_in_the_vault_shell_wipes_the_session_and_clears_the_clipboard() {
+    let fx = Fixture::with_alice();
+    let (exit, t) = fx.shell(with_github(vec![line("get github --copy"), Input::Panic]));
+    assert_eq!(exit, Exit::Failure);
+    assert_eq!(t.copied.as_deref(), Some("s3cret!"));
+    assert_eq!(t.clipboard(), None, "cleared after the panic");
+    assert_eq!(t.out.last().unwrap(), "vault locked");
+
+    // No audit event for a panic (ADR-0014): no "locked" after the reveal.
+    let (_, t) = fx.shell(vec![line("log")]);
+    assert_eq!(
+        logged_events(&t),
+        [
+            "unlocked",
+            "secret revealed 'github'",
+            "secret added 'github'",
+            "unlocked",
+            "locked",
+            "vault created",
+        ]
+    );
+}
+
+#[test]
+fn a_panic_in_the_auto_lock_watcher_wipes_the_session_and_ends_the_shell() {
+    let fx = Fixture::with_alice();
+    let (exit, t) = fx.shell(with_github(vec![
+        line("get github --copy"),
+        Input::ClockPanics,
+        line("list"),
+    ]));
+    assert_eq!(exit, Exit::Failure);
+    assert_eq!(t.clipboard(), None, "cleared after the panic");
+    assert_eq!(
+        *t.shared.notices.lock().unwrap(),
+        ["vault locked (internal error); press Enter to close"]
+    );
+    assert!(!t.stdout().contains("no secrets"), "list didn't run");
 }
 
 #[test]

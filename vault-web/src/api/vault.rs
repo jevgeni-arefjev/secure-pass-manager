@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use vault_core::audit::FileSink;
 use vault_core::session::{
-    DEFAULT_IDLE_TIMEOUT, MIN_UNLOCK_FAILURE, Session, SessionConfig, SessionError,
+    DEFAULT_IDLE_TIMEOUT, InternalCause, MIN_UNLOCK_FAILURE, Session, SessionConfig, SessionError,
     check_master_password,
 };
 use vault_core::storage::{FileStore, Vaultname};
@@ -256,7 +256,7 @@ pub(super) fn issued_session(
     let (id, session) = issued.map_err(|refused| match refused {
         IssueRefused::Stopping => ApiError::STOPPING,
         IssueRefused::Ended => ApiError::LOCKED,
-        IssueRefused::Randomness => internal_error("randomness", None),
+        IssueRefused::Randomness => internal_error(InternalCause::Randomness, None),
     })?;
     let mut response = (
         status,

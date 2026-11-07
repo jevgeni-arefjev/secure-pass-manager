@@ -18,8 +18,8 @@ use vault_core::backup::BackupError;
 use vault_core::crypto::{self, Header, MasterPassword, Plaintext};
 use vault_core::session::{
     self, Clock, CustomField, CustomFieldPart, DEFAULT_IDLE_TIMEOUT, FieldProblem, FieldValue,
-    HiddenValue, InternalFailure, Saved, Secret, SecretField, Session, SessionConfig, SessionError,
-    WeakMasterPassword,
+    HiddenValue, InternalCause, InternalFailure, Saved, Secret, SecretField, Session,
+    SessionConfig, SessionError, WeakMasterPassword,
 };
 use vault_core::storage::{FileStore, MAX_VAULT_FILE_LEN, VaultStore, Vaultname};
 
@@ -973,7 +973,7 @@ fn read_only_vault_home_is_a_storage_failure_with_permission_denied() {
     assert_eq!(
         err.internal_failure(),
         Some(InternalFailure {
-            cause: "storage",
+            cause: InternalCause::Storage,
             kind: Some(ErrorKind::PermissionDenied),
         })
     );
@@ -984,27 +984,27 @@ fn internal_failures_name_their_cause_and_other_errors_have_none() {
     let failure = |cause, kind| Some(InternalFailure { cause, kind });
     assert_eq!(
         SessionError::Storage(ErrorKind::StorageFull).internal_failure(),
-        failure("storage", Some(ErrorKind::StorageFull))
+        failure(InternalCause::Storage, Some(ErrorKind::StorageFull))
     );
     assert_eq!(
         SessionError::Backup(BackupError::Io(ErrorKind::ReadOnlyFilesystem)).internal_failure(),
-        failure("backup", Some(ErrorKind::ReadOnlyFilesystem))
+        failure(InternalCause::Backup, Some(ErrorKind::ReadOnlyFilesystem))
     );
     assert_eq!(
         SessionError::Backup(BackupError::Unverified).internal_failure(),
-        failure("backup", None)
+        failure(InternalCause::Backup, None)
     );
     assert_eq!(
         SessionError::Randomness.internal_failure(),
-        failure("randomness", None)
+        failure(InternalCause::Randomness, None)
     );
     assert_eq!(
         SessionError::VaultUnreadable.internal_failure(),
-        failure("vault_unreadable", None)
+        failure(InternalCause::VaultUnreadable, None)
     );
     assert_eq!(
         SessionError::AuditLog.internal_failure(),
-        failure("audit_log", None)
+        failure(InternalCause::AuditLog, None)
     );
     for err in [
         SessionError::UnlockFailed,
@@ -1016,6 +1016,15 @@ fn internal_failures_name_their_cause_and_other_errors_have_none() {
     ] {
         assert_eq!(err.internal_failure(), None, "{err:?}");
     }
+}
+
+#[test]
+fn internal_causes_are_logged_by_fixed_names() {
+    assert_eq!(InternalCause::Storage.name(), "storage");
+    assert_eq!(InternalCause::Backup.name(), "backup");
+    assert_eq!(InternalCause::Randomness.name(), "randomness");
+    assert_eq!(InternalCause::VaultUnreadable.name(), "vault_unreadable");
+    assert_eq!(InternalCause::AuditLog.name(), "audit_log");
 }
 
 #[test]

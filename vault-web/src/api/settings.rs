@@ -27,7 +27,7 @@ use vault_core::session::{SessionError, check_master_password};
 
 use crate::AppState;
 use crate::api::vault::issued_session;
-use crate::api::{ApiError, internal_error, kdf_error, read_error};
+use crate::api::{ApiError, Cause, internal_error, kdf_error, read_error};
 use crate::auth::CurrentSession;
 use crate::json::{MasterPasswordField, StrictJson};
 
@@ -121,7 +121,7 @@ pub(crate) async fn backup(
         file.revision()
     );
     let disposition =
-        HeaderValue::try_from(name).map_err(|_| internal_error("response_header", None))?;
+        HeaderValue::try_from(name).map_err(|_| internal_error(Cause::ResponseHeader, None))?;
     Ok((
         [
             (

@@ -9,10 +9,13 @@
 //!   The process exits on the next input, once the terminal can be restored.
 //! - SIGTERM, SIGHUP, SIGINT and SIGQUIT lock the vault and clear the clipboard before
 //!   the process exits (Unix).
+//! - A panic in the vault shell wipes the session (without an audit event) and clears
+//!   the clipboard, then the CLI exits with a failure status (ADR-0014).
 //! - Once the vault is locked, by any route, the process ends; it never keeps running
 //!   without a session.
 
 use std::ffi::OsString;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -288,8 +291,8 @@ fn unlock(
     Err(Exit::Failure)
 }
 
-/// The vault shell: reads and runs commands until `lock`, Ctrl-D, auto-lock or a lost
-/// session, then locks the vault and clears the clipboard.
+/// The vault shell: reads and runs commands until `lock`, Ctrl-D, auto-lock, a lost
+/// session or a panic, then locks the vault and clears the clipboard.
 ///
 /// ```ignore
 /// vault_shell(terminal, env, session, &vault_dir, 5)
@@ -319,16 +322,61 @@ fn vault_shell(
         signals::lock_on_termination(Arc::clone(&session), Arc::clone(&handle));
     }
 
-    let exit = loop {
+    // A panic (its location already printed by the hook) still wipes the session and
+    // clears the clipboard below, without an audit event (ADR-0014).
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        run_commands(terminal, &session, vault_dir, &auto_locked)
+    }));
+
+    drop(stop_watcher);
+    let _ = watcher.join();
+    let open = session
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    let panicked = outcome.is_err();
+    let exit = match outcome {
+        Ok(exit) => {
+            if let Some(open) = open {
+                open.lock();
+            }
+            exit
+        }
+        // Dropping the session zeroizes its keys and secrets; nothing is audited.
+        Err(_) => {
+            drop(open);
+            Exit::Failure
+        }
+    };
+    handle.clear_clipboard();
+    if exit == Exit::Success || panicked {
+        terminal.print("vault locked");
+    }
+    exit
+}
+
+/// Reads and runs vault shell commands until `lock`, Ctrl-D, auto-lock or a lost
+/// session; the caller then locks the vault.
+///
+/// ```ignore
+/// let exit = run_commands(terminal, &session, vault_dir, &auto_locked);
+/// ```
+fn run_commands(
+    terminal: &mut dyn Terminal,
+    session: &SharedSession,
+    vault_dir: &Path,
+    auto_locked: &AtomicBool,
+) -> Exit {
+    loop {
         let line = terminal.read_command(PROMPT);
         if auto_locked.load(Ordering::SeqCst) {
-            break Exit::Failure;
+            return Exit::Failure;
         }
         let line = match line {
             Ok(line) => line,
             Err(TerminalError::Interrupted) => continue,
-            Err(TerminalError::EndOfInput) => break Exit::Success,
-            Err(err) => break fail(terminal, err),
+            Err(TerminalError::EndOfInput) => return Exit::Success,
+            Err(err) => return fail(terminal, err),
         };
         let Some(words) = shlex::split(&line).map(zeroize::Zeroizing::new) else {
             terminal.print_error("vault: unbalanced quotes");
@@ -348,37 +396,26 @@ fn vault_shell(
                 continue;
             }
         };
-        match commands::execute(command, terminal, &session, vault_dir) {
+        match commands::execute(command, terminal, session, vault_dir) {
             Ok(Flow::Continue) => {}
-            Ok(Flow::Lock) => break Exit::Success,
+            Ok(Flow::Lock) => return Exit::Success,
             Err(err) => {
                 commands::report(terminal, &err);
                 if err.ends_session() {
-                    break Exit::Failure;
+                    return Exit::Failure;
                 }
             }
         }
-    };
-
-    drop(stop_watcher);
-    let _ = watcher.join();
-    if let Some(session) = session
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take()
-    {
-        session.lock();
     }
-    handle.clear_clipboard();
-    if exit == Exit::Success {
-        terminal.print("vault locked");
-    }
-    exit
 }
 
 /// Starts the auto-lock watcher: every `interval` it checks the idle timeout, and once
 /// it has passed, wipes the session, clears the clipboard, sets `auto_locked` and says
 /// so above the prompt. Dropping the returned sender stops it.
+///
+/// Security: a panic during the check (its location printed by the hook) wipes the
+/// session the same way, without an audit event, so auto-lock never silently stops
+/// while the vault stays unlocked.
 ///
 /// ```ignore
 /// let (stop, watcher) = spawn_auto_lock(session, handle, auto_locked, Duration::from_secs(1));
@@ -394,24 +431,58 @@ fn spawn_auto_lock(
     let (stop, stopped) = mpsc::channel::<()>();
     let watcher = thread::spawn(move || {
         while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
-            let mut guard = session.lock().unwrap_or_else(PoisonError::into_inner);
-            let idle = match guard.as_mut() {
-                Some(open) => !open.is_unlocked(),
-                None => return,
-            };
-            if idle {
-                if let Some(session) = guard.take() {
-                    session.lock();
+            let notice = match panic::catch_unwind(AssertUnwindSafe(|| lock_if_idle(&session))) {
+                Ok(Watch::Open) => continue,
+                Ok(Watch::Gone) => return,
+                Ok(Watch::Locked) => "vault locked (idle); press Enter to close",
+                // Dropping the session zeroizes its keys and secrets; nothing is audited.
+                Err(_) => {
+                    drop(
+                        session
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .take(),
+                    );
+                    "vault locked (internal error); press Enter to close"
                 }
-                drop(guard);
-                handle.clear_clipboard();
-                auto_locked.store(true, Ordering::SeqCst);
-                handle.notify("vault locked (idle); press Enter to close");
-                return;
-            }
+            };
+            handle.clear_clipboard();
+            auto_locked.store(true, Ordering::SeqCst);
+            handle.notify(notice);
+            return;
         }
     });
     (stop, watcher)
+}
+
+/// What one auto-lock check found.
+enum Watch {
+    /// The session is still unlocked.
+    Open,
+    /// The shell already took the session; the watcher has nothing left to do.
+    Gone,
+    /// The idle timeout had passed; the session is now locked.
+    Locked,
+}
+
+/// Locks the session if its idle timeout has passed.
+///
+/// ```ignore
+/// if let Watch::Locked = lock_if_idle(&session) { handle.clear_clipboard(); }
+/// ```
+fn lock_if_idle(session: &SharedSession) -> Watch {
+    let mut guard = session.lock().unwrap_or_else(PoisonError::into_inner);
+    let idle = match guard.as_mut() {
+        Some(open) => !open.is_unlocked(),
+        None => return Watch::Gone,
+    };
+    if !idle {
+        return Watch::Open;
+    }
+    if let Some(open) = guard.take() {
+        open.lock();
+    }
+    Watch::Locked
 }
 
 /// Termination signals (Unix only).
