@@ -581,7 +581,7 @@ async fn request_log_carries_a_session_hash_but_no_vaultname_password_cookie_or_
 
     let session_id = alice.cookie.split_once('=').unwrap().1;
     for logs in [&create_logs, &failed_logs, &session_logs, &lock_logs] {
-        assert!(logs.contains("status="), "{logs}");
+        assert!(request_line(logs)["status"].is_number(), "{logs}");
         for leak in [
             "zebracorn",
             PASSWORD,
@@ -593,10 +593,7 @@ async fn request_log_carries_a_session_hash_but_no_vaultname_password_cookie_or_
             assert!(!logs.contains(leak), "{leak:?} in {logs}");
         }
     }
-    let tag = |logs: &str| {
-        let start = logs.find("session=").expect("session field") + "session=".len();
-        logs[start..].split_whitespace().next().unwrap().to_owned()
-    };
+    let tag = |logs: &str| request_line(logs)["session"].as_str().unwrap().to_owned();
     assert_eq!(tag(&create_logs).len(), 8);
     assert_eq!(tag(&create_logs), tag(&session_logs));
     assert_eq!(tag(&session_logs), tag(&lock_logs));
@@ -631,12 +628,9 @@ async fn a_storage_failure_on_unlock_is_a_generic_500_not_a_wrong_password() {
         body_json(response).await,
         json!({"error": "internal error"})
     );
-    let internal: Vec<&str> = logs
-        .lines()
-        .filter(|line| line.contains("internal_error"))
-        .collect();
-    assert_eq!(internal.len(), 1, "{logs}");
-    assert!(internal[0].contains("cause=\"storage\""), "{logs}");
-    assert!(internal[0].contains("kind=PermissionDenied"), "{logs}");
+    let internal = internal_error_line(&logs);
+    assert_eq!(internal["cause"], "storage", "{logs}");
+    assert_eq!(internal["kind"], "PermissionDenied", "{logs}");
+    assert_eq!(internal["level"], "ERROR", "{logs}");
     assert!(!logs.contains("alice"), "{logs}");
 }

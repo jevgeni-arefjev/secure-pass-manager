@@ -128,10 +128,14 @@ async fn without_a_bundle_the_client_not_built_page_is_served() {
 async fn request_log_has_method_route_template_status_and_latency() {
     let app = TestApp::new();
     let (_, logs) = send_logged(&app, get("/app.js?token=hunter2")).await;
-    assert!(logs.contains("method=GET"), "{logs}");
-    assert!(logs.contains("route=/{file}"), "{logs}");
-    assert!(logs.contains("status=200"), "{logs}");
-    assert!(logs.contains("latency_ms="), "{logs}");
+    let line = request_line(&logs);
+    assert_eq!(line["method"], "GET", "{logs}");
+    assert_eq!(line["route"], "/{file}", "{logs}");
+    assert_eq!(line["status"], 200, "{logs}");
+    assert!(line["latency_ms"].is_number(), "{logs}");
+    assert_eq!(line["session"], "-", "{logs}");
+    assert_eq!(line["level"], "INFO", "{logs}");
+    assert!(line["timestamp"].is_string(), "{logs}");
     assert!(
         !logs.contains("app.js") && !logs.contains("hunter2"),
         "{logs}"
@@ -148,10 +152,7 @@ async fn request_log_never_holds_the_concrete_path() {
     ] {
         let (response, logs) = send_logged(&app, get(path)).await;
         assert_eq!(response.status(), status, "{path}");
-        assert!(
-            logs.contains(&format!("status={}", status.as_u16())),
-            "{logs}"
-        );
+        assert_eq!(request_line(&logs)["status"], status.as_u16(), "{logs}");
         assert!(!logs.contains("alice-github"), "{logs}");
     }
 }
@@ -160,6 +161,34 @@ async fn request_log_never_holds_the_concrete_path() {
 async fn refused_host_is_logged_without_the_host() {
     let app = TestApp::new();
     let (_, logs) = send_logged(&app, get_with_host("/", "rebind.evil.example:8443")).await;
-    assert!(logs.contains("status=421"), "{logs}");
+    assert_eq!(request_line(&logs)["status"], 421, "{logs}");
     assert!(!logs.contains("evil"), "{logs}");
+}
+
+#[test]
+fn logging_stays_at_info_even_with_rust_log_trace() {
+    const CHILD: &str = "VAULT_WEB_TEST_RUST_LOG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Setting the variable in-process needs `unsafe`; run this test again in a
+        // child process that has it from the start.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "logging_stays_at_info_even_with_rust_log_trace"])
+            .env("RUST_LOG", "trace")
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    init_logging();
+    take_logs();
+    tracing::trace!(event = "trace_probe");
+    tracing::debug!(event = "debug_probe");
+    tracing::info!(event = "info_probe");
+    let logs = take_logs();
+    let events: Vec<_> = log_lines(&logs)
+        .into_iter()
+        .map(|line| line["event"].clone())
+        .collect();
+    assert_eq!(events, ["info_probe"], "{logs}");
 }

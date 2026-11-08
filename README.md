@@ -78,8 +78,8 @@ Course deliverables:
 ├── vault-web/              # `vault-web` binary: HTTPS server for the browser client
 │   ├── build.rs            # embeds assets/ into the binary at compile time; never runs npm
 │   ├── assets/             # client bundle from `npm run build` in web/ (not committed)
-│   ├── tests/common/       # shared test helpers: test app on a temp vault directory with a manual (optionally panicking) clock, a gate clock holding a KDF slot, request builders, log capture
-│   ├── tests/app.rs        # the HTTP app in-process (tower `oneshot`): security headers, Host check, request logs, "client not built" page
+│   ├── tests/common/       # shared test helpers: test app on a temp vault directory with a manual (optionally panicking) clock, a gate clock holding a KDF slot, request builders, log capture through the server's own subscriber (every line checked to be JSON)
+│   ├── tests/app.rs        # the HTTP app in-process (tower `oneshot`): security headers, Host check, request logs (JSON fields, level fixed even with `RUST_LOG=trace`), "client not built" page
 │   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, master password rules, KDF limiter (503; cheap create checks first), strict parsing, log contents, a storage failure on unlock (generic 500 with an `internal_error` line, not a 401)
 │   ├── tests/secrets.rs    # list and detail: no hidden values, titles in URLs (percent-encoded, unusual characters), 404, one vault per session
 │   ├── tests/reveal.rs     # reveal: one hidden value per request, CSRF, 404 for unknown title/field, plain fields refused, audit event, nothing in logs
@@ -91,7 +91,7 @@ Course deliverables:
 │   ├── tests/tls.rs        # certificate loading, self-signed generation, 0600 cache and reuse
 │   ├── tests/args.rs       # server flags, through the public `args` API
 │   └── src/
-│       ├── main.rs         # hardens the process (refuses to start otherwise), logs to stderr (panics without their message), serves HTTPS, runs the sweeper, locks every session on SIGINT/SIGTERM
+│       ├── main.rs         # hardens the process (refuses to start otherwise), logs JSON lines to stderr via `logging` (panics without their message), serves HTTPS, runs the sweeper, locks every session on SIGINT/SIGTERM
 │       ├── lib.rs          # `App`: the whole HTTP app without TLS (router), the session sweep and sweeper task, lock all
 │       ├── config.rs       # app config (the test seam): vault directory, clock, KDF limits, session lifetime, sweep interval, port, vault format, assets
 │       ├── args.rs         # flags: --bind, --vault-dir, --tls-cert/--tls-key
@@ -106,6 +106,7 @@ Course deliverables:
 │       ├── auth.rs         # `__Host-session` cookie; extractor resolving the session and checking the CSRF token; access to that session's vault only
 │       ├── sessions.rs     # session registry: SHA-256(session ID) → vault session, CSRF token, creation time, idle timeout, wrong master passwords in a row; reissue under a new ID, lock a vault's other sessions, sweep of expired sessions, lock all
 │       ├── kdf_limiter.rs  # unlock/create/master password change on the blocking pool, 2 at once plus a short queue, else 503
+│       ├── logging.rs      # the diagnostics subscriber: JSON lines at a fixed `INFO` level, shared by `main.rs` and the test log capture (ADR-0014)
 │       ├── json.rs         # strict JSON bodies (64 KiB cap, objects only); master password straight into `MasterPassword`
 │       └── assets.rs       # embedded client bundle; "client not built" page
 └── web/                    # vanilla TypeScript browser client, bundled by esbuild into vault-web/assets
@@ -281,4 +282,8 @@ Open the printed URL. Without Node, `cargo run -p vault-web` still builds and ru
 
 - Only requests addressed to `localhost:<port>` or `127.0.0.1:<port>` are served (DNS rebinding defence); every response carries a strict CSP with Trusted Types, short HSTS (`max-age=300`) and `Cache-Control: no-store`.
 - A backup downloaded from the settings page is the encrypted vault file and opens with the master password the vault had when it was made. There is no restore in the browser: as with the CLI, create a vault home in the vault directory (e.g. `web-vaults/alice/`, mode `700`) and put the backup in it as `secrets.vault`; any vaultname works.
-- The server refuses to start if it can't disable core dumps. Request logs (stderr) hold the method, route template, status, latency and a short hash of the session ID only.
+- The server refuses to start if it can't disable core dumps. Diagnostics go to stderr as JSON lines at a fixed `INFO` level (`RUST_LOG` is ignored). Request lines hold the method, route template, status, latency and a short hash of the session ID only:
+
+  ```text
+  {"timestamp":"2026-11-08T10:00:00.000000Z","level":"INFO","event":"request","method":"GET","route":"/api/secrets/{title}","status":200,"latency_ms":1.2,"session":"3f9a1c0e"}
+  ```

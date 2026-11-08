@@ -326,9 +326,17 @@ async fn request_logs_carry_route_templates_but_no_title_or_field_value() {
     let (_, detail_logs) = send_logged(&app, alice.get("/api/secrets/GitHub")).await;
     let (_, missing_logs) = send_logged(&app, alice.get("/api/secrets/zebracorn")).await;
 
-    assert!(list_logs.contains("/api/secrets "), "{list_logs}");
+    assert_eq!(
+        request_line(&list_logs)["route"],
+        "/api/secrets",
+        "{list_logs}"
+    );
     for logs in [&detail_logs, &missing_logs] {
-        assert!(logs.contains("/api/secrets/{title}"), "{logs}");
+        assert_eq!(
+            request_line(logs)["route"],
+            "/api/secrets/{title}",
+            "{logs}"
+        );
     }
     for logs in [&list_logs, &detail_logs, &missing_logs] {
         for leak in [

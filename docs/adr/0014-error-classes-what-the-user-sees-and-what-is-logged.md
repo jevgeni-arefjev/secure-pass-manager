@@ -7,7 +7,7 @@ Every error belongs to one of four classes, and the class fixes what the person 
 | Input mistake | invalid field, weak master password, no secret with this title, backup path already exists, invalid vaultname | A specific message naming the field and the rule, never the value | No | No |
 | Security refusal | unlock failed, CSRF token, Origin, Host, wrong current master password | One generic message per refusal; unlock failure is the same whether or not the vaultname exists, after the same minimum delay | Unlock failed and master password change failed, if the vault exists | Web: the request log line only |
 | Session ended | locked (idle, lifetime, conflict, three wrong current master passwords) | A fixed message saying the vault is locked and must be unlocked again | The lock that ended it (auto-locked, locked on conflict, ...) | No |
-| Internal failure | file system, OS random number generator, a vault file that can't be read, a panic | A generic message (web: `internal error`, status 500). CLI: the generic message plus a cause kind in words, e.g. `vault storage failed (disk full)` | No | One line with what failed and its cause kind, e.g. `event=internal_error cause=storage kind=StorageFull` |
+| Internal failure | file system, OS random number generator, a vault file that can't be read, a panic | A generic message (web: `internal error`, status 500). CLI: the generic message plus a cause kind in words, e.g. `vault storage failed (disk full)` | No | One line with what failed and its cause kind, e.g. `{"event":"internal_error","cause":"storage","kind":"StorageFull"}` |
 
 ## Rules for diagnostics
 
@@ -20,7 +20,7 @@ Every error belongs to one of four classes, and the class fixes what the person 
 
 ## Panics
 
-A panic is an internal failure. Both front ends replace the default panic hook with one that prints only the location (CLI: `vault: internal error at src/x.rs:12`; web: `event=panic location=src/x.rs:12`), since a panic message can carry data. The session's keys are wiped before the process or request ends. No audit event is written: there is no reliable "locked" to record mid-panic, and ADR-0010 records an event only after its action succeeds.
+A panic is an internal failure. Both front ends replace the default panic hook with one that prints only the location (CLI: `vault: internal error at src/x.rs:12`; web: `{"event":"panic","location":"src/x.rs:12"}`), since a panic message can carry data. The session's keys are wiped before the process or request ends. No audit event is written: there is no reliable "locked" to record mid-panic, and ADR-0010 records an event only after its action succeeds.
 
 ## Considered Options
 

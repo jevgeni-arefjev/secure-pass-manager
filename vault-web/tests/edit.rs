@@ -753,7 +753,7 @@ async fn changes_log_neither_titles_nor_values() {
     for leaked in ["zebracorn", "unicorn-pa55"] {
         assert!(!logs.contains(leaked), "{logs}");
     }
-    assert!(logs.contains("/api/secrets"), "{logs}");
+    assert_eq!(request_line(&logs)["route"], "/api/secrets", "{logs}");
 }
 
 #[cfg(unix)]
@@ -780,13 +780,10 @@ async fn a_storage_failure_is_a_generic_500_with_one_internal_error_line() {
         body_json(response).await,
         json!({"error": "internal error"})
     );
-    let internal: Vec<&str> = logs
-        .lines()
-        .filter(|line| line.contains("internal_error"))
-        .collect();
-    assert_eq!(internal.len(), 1, "{logs}");
-    assert!(internal[0].contains("cause=\"storage\""), "{logs}");
-    assert!(internal[0].contains("kind=PermissionDenied"), "{logs}");
+    let internal = internal_error_line(&logs);
+    assert_eq!(internal["cause"], "storage", "{logs}");
+    assert_eq!(internal["kind"], "PermissionDenied", "{logs}");
+    assert_eq!(internal["level"], "ERROR", "{logs}");
     for leak in ["alice", "GitHub", home.parent().unwrap().to_str().unwrap()] {
         assert!(!logs.contains(leak), "{leak} in {logs}");
     }

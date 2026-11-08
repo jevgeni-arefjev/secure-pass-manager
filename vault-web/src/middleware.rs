@@ -203,12 +203,12 @@ pub(crate) async fn request_log(request: Request, next: Next) -> Response {
         .or(request_session)
         .unwrap_or_else(|| "-".to_owned());
     tracing::info!(
+        event = "request",
         method = %method,
         route = %route,
         status = response.status().as_u16(),
         latency_ms = started.elapsed().as_secs_f64() * 1000.0,
         session = %session,
-        "request"
     );
     response
 }

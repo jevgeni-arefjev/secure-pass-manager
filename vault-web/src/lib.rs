@@ -12,6 +12,7 @@ mod auth;
 pub mod config;
 mod json;
 mod kdf_limiter;
+pub mod logging;
 mod middleware;
 mod sessions;
 pub mod tls;

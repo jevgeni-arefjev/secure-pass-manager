@@ -167,7 +167,7 @@ async fn a_request_panicking_on_now_call(nth: usize) {
         body_json(response).await,
         json!({"error": "internal error"})
     );
-    assert!(logs.contains("status=500"), "{logs}");
+    assert_eq!(request_line(&logs)["status"], 500, "{logs}");
     assert!(!logs.contains("on purpose"), "{logs}");
     assert_eq!(app.session_count(), 1);
     assert!(app.audit_log("alice").contains("\"locked\""));

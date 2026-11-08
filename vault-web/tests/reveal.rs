@@ -271,7 +271,11 @@ async fn request_logs_and_errors_carry_no_revealed_value_or_title() {
         }
     }
     for logs in [&ok_logs, &plain_logs, &missing_logs, &unknown_logs] {
-        assert!(logs.contains("/api/secrets/{title}/reveal"), "{logs}");
+        assert_eq!(
+            request_line(logs)["route"],
+            "/api/secrets/{title}/reveal",
+            "{logs}"
+        );
         for leak in [
             "GitHub",
             "zebracorn",

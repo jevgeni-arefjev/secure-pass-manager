@@ -8,7 +8,6 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing_subscriber::filter::LevelFilter;
 use vault_core::storage::FileStore;
 use vault_web::args::Args;
 use vault_web::{App, AppConfig};
@@ -27,11 +26,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let args = Args::parse();
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(LevelFilter::INFO)
-        .with_target(false)
-        .init();
+    vault_web::logging::init(std::io::stderr);
     log_panics_without_message();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,

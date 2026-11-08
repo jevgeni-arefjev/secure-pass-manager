@@ -629,7 +629,8 @@ impl std::io::Write for ThreadLogs {
     }
 }
 
-/// Installs one global subscriber writing to [`ThreadLogs`], once per test binary.
+/// Installs the server's own subscriber ([`vault_web::logging::init`]) writing to
+/// [`ThreadLogs`], once per test binary.
 /// A global one, because scoped subscribers race on `tracing`'s shared callsite
 /// cache when tests run in parallel.
 ///
@@ -638,22 +639,78 @@ impl std::io::Write for ThreadLogs {
 /// ```
 pub fn init_logging() {
     static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        tracing_subscriber::fmt()
-            .with_writer(|| ThreadLogs)
-            .with_ansi(false)
-            .init();
-    });
+    INIT.call_once(|| vault_web::logging::init(|| ThreadLogs));
 }
 
-/// Sends `request` through `app` and returns what it logged.
+/// Sends `request` through `app` and returns what it logged, asserting every line is
+/// a JSON object (ADR-0014).
 ///
 /// ```text
 /// let (response, logs) = send_logged(&app, get("/")).await;
 /// ```
 pub async fn send_logged(app: &TestApp, request: Request<Body>) -> (Response<Body>, String) {
-    LOGS.with(|logs| logs.borrow_mut().clear());
+    take_logs();
     let response = app.send(request).await;
-    let logs = LOGS.with(|logs| String::from_utf8(logs.take()).unwrap());
+    let logs = take_logs();
     (response, logs)
+}
+
+/// What this thread logged since the last call, asserting every line is a JSON object.
+///
+/// ```text
+/// tracing::info!(event = "x");
+/// assert!(take_logs().contains("\"x\""));
+/// ```
+pub fn take_logs() -> String {
+    let logs = LOGS.with(|logs| String::from_utf8(logs.take()).unwrap());
+    let _ = log_lines(&logs); // panics on a line that isn't a JSON object
+    logs
+}
+
+/// Every line of `logs` parsed as a JSON object; panics on a line that isn't one.
+///
+/// ```text
+/// let lines = log_lines(&logs);
+/// ```
+pub fn log_lines(logs: &str) -> Vec<serde_json::Map<String, Value>> {
+    logs.lines()
+        .map(|line| match serde_json::from_str(line) {
+            Ok(Value::Object(object)) => object,
+            _ => panic!("log line is not a JSON object: {line}"),
+        })
+        .collect()
+}
+
+/// The lines of `logs` whose `event` field is `event`.
+///
+/// ```text
+/// let internal = log_events(&logs, "internal_error");
+/// ```
+pub fn log_events(logs: &str, event: &str) -> Vec<serde_json::Map<String, Value>> {
+    log_lines(logs)
+        .into_iter()
+        .filter(|line| line.get("event").and_then(Value::as_str) == Some(event))
+        .collect()
+}
+
+/// The only `internal_error` line of `logs`.
+///
+/// ```text
+/// assert_eq!(internal_error_line(&logs)["cause"], "storage");
+/// ```
+pub fn internal_error_line(logs: &str) -> serde_json::Map<String, Value> {
+    let mut lines = log_events(logs, "internal_error");
+    assert_eq!(lines.len(), 1, "one internal_error line in {logs}");
+    lines.remove(0)
+}
+
+/// The only request line of `logs`.
+///
+/// ```text
+/// assert_eq!(request_line(&logs)["status"], 200);
+/// ```
+pub fn request_line(logs: &str) -> serde_json::Map<String, Value> {
+    let mut lines = log_events(logs, "request");
+    assert_eq!(lines.len(), 1, "one request line in {logs}");
+    lines.remove(0)
 }
