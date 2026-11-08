@@ -62,7 +62,9 @@ Course deliverables:
 ├── vault-cli/              # `vault` binary: command parsing, terminal prompts, one-secret reveal
 │   ├── tests/args.rs       # command grammar and help text, through its public API
 │   ├── tests/render.rs     # terminal output (get view, list table, log view, escaping against the shared fixture, cause kinds in words), through its public API
+│   ├── tests/common/       # shared test helpers: scripted fake terminal (hidden and visible input kept apart), manual (optionally panicking) clock, temp vault directory running `shell::run`
 │   ├── tests/shell.rs      # the CLI and vault shell end to end, on a scripted fake terminal, including a panic in the vault shell or the auto-lock watcher (session wiped, clipboard cleared, no audit event)
+│   ├── tests/no_secret_leaks.rs # one scripted init and unlock session (wrong, weak, mismatched and changed master passwords, refused and saved hidden fields, `get --show` into a pipe, backup, log): no master password or hidden field value in stdout, stderr, diagnostics captured at every level, or the audit logs
 │   ├── tests/diagnostics.rs # each diagnostic code as its sentence, the real binary's stderr for a loose vault file, a panic printed without its message
 │   └── src/
 │       ├── main.rs         # replaces the panic hook, hardens the process, prints diagnostics to stderr, runs the CLI on the real terminal
