@@ -79,7 +79,7 @@ pub enum CryptoError {
     UnlockFailed,
     /// The body failed authentication even though the vault key unwrapped.
     BodyCorrupt,
-    /// Unknown format version or KDF, KDF params out of bounds, or malformed bytes.
+    /// Unknown format version (which fixes the KDF and its params), or malformed bytes.
     UnsupportedFormat,
     /// The OS random number generator failed.
     Randomness,

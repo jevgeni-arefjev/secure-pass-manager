@@ -193,7 +193,7 @@ impl MasterPassword {
     /// normalization (ADR-0007). For "type it again" confirmation prompts.
     ///
     /// Security: both sides stay in locked memory; no copy is made. The comparison is
-    /// not constant-time, which is fine for comparing two entries the same user just
+    /// not constant-time, which is fine for comparing two inputs the same user just
     /// typed, but don't use it to check a password against a stored value.
     ///
     /// ```

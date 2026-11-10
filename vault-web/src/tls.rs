@@ -82,6 +82,44 @@ impl std::fmt::Display for TlsError {
 
 impl std::error::Error for TlsError {}
 
+impl TlsError {
+    /// A fixed name for the failed step, for the `startup_failed` diagnostic.
+    ///
+    /// Security: unlike [`Display`](std::fmt::Display), it names no path and carries no
+    /// OS or library error text (ADR-0014).
+    ///
+    /// ```
+    /// # use vault_web::tls::TlsError;
+    /// assert_eq!(TlsError::InvalidKey("key.pem".into()).cause(), "tls_key_invalid");
+    /// ```
+    #[must_use]
+    pub fn cause(&self) -> &'static str {
+        match self {
+            Self::Io(..) => "tls_file",
+            Self::InvalidCertificate(_) => "tls_certificate_invalid",
+            Self::InvalidKey(_) => "tls_key_invalid",
+            Self::Rejected(_) => "tls_pair_refused",
+            Self::Generate(_) => "tls_generate",
+        }
+    }
+
+    /// The file system cause kind, for a certificate or key file that couldn't be read
+    /// or written; `None` for the other failures.
+    ///
+    /// ```
+    /// # use vault_web::tls::TlsError;
+    /// let err = TlsError::Io("key.pem".into(), std::io::ErrorKind::NotFound.into());
+    /// assert_eq!(err.kind(), Some(std::io::ErrorKind::NotFound));
+    /// ```
+    #[must_use]
+    pub fn kind(&self) -> Option<std::io::ErrorKind> {
+        match self {
+            Self::Io(_, err) => Some(err.kind()),
+            _ => None,
+        }
+    }
+}
+
 /// The rustls server config for `source`, offering HTTP/2 and HTTP/1.1 via ALPN.
 /// For [`CertSource::SelfSigned`], a cached certificate is reused; if either cached
 /// file is missing, a new pair is generated and cached.

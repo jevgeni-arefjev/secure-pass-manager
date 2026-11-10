@@ -145,7 +145,7 @@ pub enum ShellCommand {
         )]
         limit: u16,
     },
-    /// Lock the vault and leave the shell
+    /// Lock the vault and leave the vault shell
     #[command(visible_aliases = ["exit", "quit"])]
     Lock,
 }

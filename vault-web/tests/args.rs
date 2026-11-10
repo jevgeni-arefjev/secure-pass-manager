@@ -72,6 +72,16 @@ fn bind_must_be_an_address_with_a_port() {
 }
 
 #[test]
+fn bind_refuses_addresses_other_machines_could_reach() {
+    for addr in ["0.0.0.0:8443", "[::]:8443", "192.168.1.10:8443"] {
+        assert!(parse(&["--bind", addr]).is_err(), "{addr} was accepted");
+    }
+    for addr in ["127.0.0.1:8443", "127.0.0.2:8443", "[::1]:8443"] {
+        assert!(parse(&["--bind", addr]).is_ok(), "{addr} was refused");
+    }
+}
+
+#[test]
 fn help_shows_the_plain_summary_without_doc_examples() {
     let help = Args::command().render_long_help().to_string();
     assert!(

@@ -19,8 +19,9 @@
 //!   revision is the one the new revision follows, so two sessions can't silently
 //!   overwrite each other.
 //! - Vault and lock files are opened without following symlinks. The vault directory
-//!   and vault homes are `0700`, vault and lock files `0600` (Unix); looser permissions
-//!   are logged as a warning and the vault still opens.
+//!   and vault homes are `0700`, vault and lock files `0600` (Unix); a directory others
+//!   can write to, or a file others can read or write, is logged as a warning and the
+//!   vault still opens.
 //!
 //! ```
 //! use vault_core::crypto::{self, MasterPassword, Plaintext};
@@ -483,9 +484,10 @@ pub(crate) fn existing_vault_home(dir: &Path, name: &Vaultname) -> Result<PathBu
 /// for vault files in a vault home and for backups (see [`crate::backup`]).
 ///
 /// Security: opened with `O_NOFOLLOW` and checked on the opened file, so it can't be
-/// swapped for a symlink or special file (e.g. a FIFO, which would block a read)
-/// between check and read; such files and files over [`MAX_VAULT_FILE_LEN`] are
-/// refused as [`StorageError::NotAVault`].
+/// swapped for a symlink or another special file between check and read; such files
+/// and files over [`MAX_VAULT_FILE_LEN`] are refused as [`StorageError::NotAVault`].
+/// A FIFO would block the open itself, before that check: callers rule it out first
+/// with `symlink_metadata` (only the owner or root could swap one in between).
 ///
 /// ```ignore
 /// let (file, metadata) = storage::open_vault_file_at(&path)?;
@@ -713,8 +715,12 @@ fn create_vault_home(home: &Path) -> io::Result<()> {
     }
 }
 
-/// Whether other users may write to this file or directory (group- or world-writable).
-/// Always `false` off Unix, where there are no mode bits to check.
+/// Whether other users may write to this directory, or read or write this file (group
+/// or other bits). A readable file matters too: the audit log holds titles in
+/// plaintext, and a readable vault file can be copied for offline guessing. A readable
+/// directory only shows names (vaultnames, at most), so it isn't flagged: a vault
+/// directory passed with `--vault-dir` is often `0755`. Always `false` off Unix, where
+/// there are no mode bits to check.
 ///
 /// ```ignore
 /// if is_loosely_permitted(&metadata) { tracing::warn!(...) }
@@ -723,7 +729,8 @@ pub(crate) fn is_loosely_permitted(metadata: &Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o022 != 0
+        let loose = if metadata.is_dir() { 0o022 } else { 0o066 };
+        metadata.permissions().mode() & loose != 0
     }
     #[cfg(not(unix))]
     {

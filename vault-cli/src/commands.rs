@@ -66,7 +66,7 @@ pub(crate) enum CommandError {
     NotATerminal,
     /// `get --copy` on a secret without a password.
     NoPassword,
-    /// The two entries of a new master password differ.
+    /// The two inputs of a new master password differ.
     PasswordsDiffer,
 }
 
@@ -191,8 +191,9 @@ impl From<GeneratorError> for CommandError {
     }
 }
 
-/// Prints `vault: <err>` to stderr. An internal failure (ADR-0014) also gets an
-/// `event = "internal_error"` diagnostic with its cause and kind.
+/// Prints `vault: <err>` to stderr. An internal failure (ADR-0014) then also gets an
+/// `event = "internal_error"` diagnostic with its cause and kind; for a kind the CLI
+/// has no words for, also as `unworded_kind`, which [`crate::diagnostics`] prints.
 ///
 /// Security: the diagnostic holds only fixed names and an [`std::io::ErrorKind`], never
 /// a path, the vaultname or anything typed.
@@ -201,14 +202,18 @@ impl From<GeneratorError> for CommandError {
 /// commands::report(terminal, &CommandError::from(SessionError::Locked));
 /// ```
 pub(crate) fn report(terminal: &mut dyn Terminal, err: &CommandError) {
+    terminal.print_error(&format!("vault: {err}"));
     if let Some(failure) = err.internal_failure() {
         tracing::error!(
             event = "internal_error",
             cause = failure.cause.name(),
             kind = failure.kind.map(tracing::field::debug),
+            unworded_kind = failure
+                .kind
+                .filter(|&kind| !render::is_worded(kind))
+                .map(tracing::field::debug),
         );
     }
-    terminal.print_error(&format!("vault: {err}"));
 }
 
 /// Runs one vault shell command. `vault_dir` is the vault directory the session's
@@ -238,12 +243,12 @@ pub(crate) fn execute(
 }
 
 /// Asks for a new master password, checks its strength at once, then asks for it
-/// again; the two entries must match.
+/// again; the two inputs must match.
 ///
 /// A weak password fails with `CommandError::Session(SessionError::WeakMasterPassword)`
 /// before the repeat prompt, so the user doesn't type it twice for nothing.
 ///
-/// Security: both entries move straight into locked [`MasterPassword`]s (no extra plain
+/// Security: both inputs move straight into locked [`MasterPassword`]s (no extra plain
 /// copy) and are compared there.
 ///
 /// ```ignore
@@ -264,7 +269,7 @@ pub(crate) fn new_master_password(
     Ok(password)
 }
 
-/// `get`: prints a secret masked, with `--show` unmasked, or with `--copy` copies its
+/// `get`: prints a secret masked, with `--show` revealed, or with `--copy` copies its
 /// password to the clipboard instead.
 ///
 /// ```ignore
@@ -438,7 +443,7 @@ fn ask_password(terminal: &mut dyn Terminal) -> Result<Option<HiddenValue>, Comm
 }
 
 /// Asks for the comma-separated tags until every one passes [`check::tag`] against the
-/// tags before it on the line. Blank entries are dropped; an empty line means no tags.
+/// tags before it on the line. Blank tags are dropped; an empty line means no tags.
 ///
 /// ```ignore
 /// for tag in ask_tags(terminal)? { secret = secret.with_tag(tag); }

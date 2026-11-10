@@ -38,6 +38,9 @@ pub enum TerminalError {
     NotATerminal,
     /// A paste into a hidden prompt held a line break; nothing was taken from it.
     MultilinePaste,
+    /// A paste into a hidden prompt held a control character other than a line break
+    /// (e.g. a tab or ESC); nothing was taken from it.
+    ControlCharacterPaste,
     /// A paste into a hidden prompt would have taken it past its character limit;
     /// nothing was taken from it.
     PasteTooLong,
@@ -60,6 +63,9 @@ impl fmt::Display for TerminalError {
             Self::EndOfInput => "end of input",
             Self::NotATerminal => "hidden input needs a terminal",
             Self::MultilinePaste => "pasted text held a line break; nothing was entered",
+            Self::ControlCharacterPaste => {
+                "pasted text held a control character; nothing was entered"
+            }
             Self::PasteTooLong => {
                 return write!(
                     f,

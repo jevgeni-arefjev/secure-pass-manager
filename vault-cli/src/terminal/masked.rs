@@ -9,6 +9,8 @@
 //!   [`MAX_HIDDEN_CHARS`], so it never reallocates and leaves a copy behind.
 //! - A paste holding a line break is refused whole, so the rest of it can't spill into
 //!   the next prompt or the shell history.
+//! - A paste holding any other control character (a tab, ESC) is refused whole too, so
+//!   a pasted value is never entered with characters silently dropped.
 //! - A paste that would take the input past [`MAX_HIDDEN_CHARS`] is refused whole too,
 //!   so a long value is never saved cut short. Typed characters past it ring the bell.
 //! - Raw mode and bracketed paste are switched off again by a drop guard, on every exit
@@ -129,17 +131,16 @@ impl MaskedInput {
             Key::Paste(text) if text.contains(['\n', '\r']) => {
                 Step::Abort(TerminalError::MultilinePaste)
             }
-            Key::Paste(text) if self.chars + count_taken(text) > MAX_HIDDEN_CHARS => {
+            Key::Paste(text) if text.chars().any(char::is_control) => {
+                Step::Abort(TerminalError::ControlCharacterPaste)
+            }
+            Key::Paste(text) if self.chars + text.chars().count() > MAX_HIDDEN_CHARS => {
                 Step::Abort(TerminalError::PasteTooLong)
             }
             Key::Paste(text) => {
+                // No control characters and room for all of it, so every push succeeds.
                 let added = text.chars().filter(|&c| self.push(c)).count();
-                let all_taken = added == text.chars().count();
-                Step::Continue(if all_taken {
-                    Echo::Stars(added)
-                } else {
-                    Echo::Bell
-                })
+                Step::Continue(Echo::Stars(added))
             }
         }
     }
@@ -176,15 +177,6 @@ impl MaskedInput {
         self.text.zeroize();
         self.chars = 0;
     }
-}
-
-/// How many characters of `text` an input would take: all but control characters.
-///
-/// ```ignore
-/// assert_eq!(count_taken("ab\u{1b}"), 2);
-/// ```
-fn count_taken(text: &str) -> usize {
-    text.chars().filter(|c| !c.is_control()).count()
 }
 
 /// Switches the terminal into raw mode with bracketed paste, and back again on drop.
@@ -415,11 +407,12 @@ mod tests {
     }
 
     #[test]
-    fn control_characters_in_a_paste_do_not_count_towards_the_limit() {
-        let mut input = MaskedInput::new();
-        let paste = format!("{}\u{1b}", "x".repeat(MAX_HIDDEN_CHARS));
-        assert_eq!(input.press(Key::Paste(&paste)), Step::Continue(Echo::Bell));
-        assert_eq!(input.into_text().chars().count(), MAX_HIDDEN_CHARS);
+    fn paste_with_a_control_character_is_refused_whole() {
+        for paste in ["abc\tdef", "abc\u{1b}[31m", "\u{7f}x"] {
+            let (steps, text) = type_keys(vec![Key::Char('a'), Key::Paste(paste)]);
+            assert_eq!(steps[1], Step::Abort(TerminalError::ControlCharacterPaste));
+            assert_eq!(text, "a");
+        }
     }
 
     #[test]

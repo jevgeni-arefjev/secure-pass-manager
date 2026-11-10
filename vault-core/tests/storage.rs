@@ -164,10 +164,6 @@ fn unsafe_or_malformed_vaultnames_are_rejected() {
         "al ice",
         "alice\0",
         "ålice",
-        "con",
-        "NUL",
-        "com1",
-        "lpt9",
         &too_long,
     ] {
         assert_eq!(

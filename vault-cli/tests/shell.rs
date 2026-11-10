@@ -842,8 +842,31 @@ fn unknown_commands_and_bad_quotes_are_reported_and_the_shell_goes_on() {
     let script = vec![line("frobnicate"), line("get \"unclosed"), line("lock")];
     let (exit, t) = fx.shell(script);
     assert_eq!(exit, Exit::Success);
-    assert!(t.stderr().contains("unrecognized subcommand"));
+    assert!(
+        t.stderr()
+            .contains("vault: unknown command; type `help` for commands")
+    );
     assert!(t.stderr().contains("vault: unbalanced quotes"));
+}
+
+#[test]
+fn a_password_pasted_at_the_vault_prompt_is_not_echoed() {
+    let fx = Fixture::with_alice();
+    let script = vec![
+        line("Tr0ub4dor&3-pasted"),
+        line("get github Tr0ub4dor&3-pasted"),
+        line("lsit"),
+        line("lock"),
+    ];
+    let (exit, t) = fx.shell(script);
+    assert_eq!(exit, Exit::Success);
+    assert!(!t.stderr().contains("Tr0ub4dor"));
+    assert!(!t.stdout().contains("Tr0ub4dor"));
+    assert!(
+        t.stderr()
+            .contains("vault: unexpected argument; type `help` for commands")
+    );
+    assert!(t.stderr().contains("did you mean `list`?"));
 }
 
 #[test]

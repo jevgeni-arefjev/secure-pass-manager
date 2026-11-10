@@ -16,8 +16,6 @@ use std::time::Duration;
 use arboard::SetExtApple as _;
 #[cfg(target_os = "linux")]
 use arboard::SetExtLinux as _;
-#[cfg(target_os = "windows")]
-use arboard::SetExtWindows as _;
 use vault_core::session::HiddenValue;
 use zeroize::Zeroizing;
 

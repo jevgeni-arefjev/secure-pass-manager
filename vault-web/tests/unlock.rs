@@ -119,7 +119,6 @@ async fn invalid_vaultname_is_a_field_error_and_touches_no_file() {
         ".hidden",
         "-alice",
         "alice\u{0}",
-        "con",
         "alicé",
         &"a".repeat(33),
     ] {

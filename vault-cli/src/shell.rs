@@ -197,6 +197,14 @@ fn open_vault(
         Err(err) => return fail(terminal, err),
     };
     let audit: Arc<dyn AuditSink> = Arc::new(FileSink::new(dir.clone()));
+    // Installed before the first prompt, so a signal during a master password prompt
+    // (terminal in raw mode) still restores the terminal; the session joins it once
+    // the vault is open.
+    let shared: SharedSession = Arc::new(Mutex::new(None));
+    #[cfg(unix)]
+    if env.handle_signals {
+        signals::lock_on_termination(Arc::clone(&shared), terminal.handle());
+    }
     // Surrounding spaces are trimmed by `Vaultname::parse`, as on the web.
     let vaultname = match &open.vaultname {
         Some(name) => name.clone(),
@@ -219,7 +227,7 @@ fn open_vault(
         Opening::Unlock => unlock(terminal, &store, &vaultname, &config),
     };
     match session {
-        Ok(session) => vault_shell(terminal, env, session, &dir, open.idle_timeout),
+        Ok(session) => vault_shell(terminal, env, shared, session, &dir, open.idle_timeout),
         Err(exit) => exit,
     }
 }
@@ -292,14 +300,16 @@ fn unlock(
 }
 
 /// The vault shell: reads and runs commands until `lock`, Ctrl-D, auto-lock, a lost
-/// session or a panic, then locks the vault and clears the clipboard.
+/// session or a panic, then locks the vault and clears the clipboard. `slot` is the
+/// (empty) shared slot the signal handler already watches; the session is put in it.
 ///
 /// ```ignore
-/// vault_shell(terminal, env, session, &vault_dir, 5)
+/// vault_shell(terminal, env, shared, session, &vault_dir, 5)
 /// ```
 fn vault_shell(
     terminal: &mut dyn Terminal,
     env: &Env,
+    slot: SharedSession,
     session: Session<FileStore>,
     vault_dir: &Path,
     idle_minutes: u64,
@@ -308,7 +318,8 @@ fn vault_shell(
         "vault '{}' unlocked; it locks after {idle_minutes} idle minute(s). Type `help` for commands.",
         session.vaultname()
     ));
-    let session: SharedSession = Arc::new(Mutex::new(Some(session)));
+    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(session);
+    let session = slot;
     let handle = terminal.handle();
     let auto_locked = Arc::new(AtomicBool::new(false));
     let (stop_watcher, watcher) = spawn_auto_lock(
@@ -317,10 +328,6 @@ fn vault_shell(
         Arc::clone(&auto_locked),
         env.lock_check_interval,
     );
-    #[cfg(unix)]
-    if env.handle_signals {
-        signals::lock_on_termination(Arc::clone(&session), Arc::clone(&handle));
-    }
 
     // A panic (its location already printed by the hook) still wipes the session and
     // clears the clipboard below, without an audit event (ADR-0014).
@@ -392,7 +399,7 @@ fn run_commands(
                 continue;
             }
             Err(err) => {
-                terminal.print_error(err.render().to_string().trim_end());
+                terminal.print_error(&shell_usage_error(&err));
                 continue;
             }
         };
@@ -406,6 +413,34 @@ fn run_commands(
                 }
             }
         }
+    }
+}
+
+/// The message for a vault shell line that didn't parse.
+///
+/// Security: an unknown command or an unexpected argument is reported without the
+/// word itself, since a person who pastes a password at `vault>` by mistake would
+/// otherwise see it echoed (and kept in the scrollback). Only clap's suggestions, which
+/// are known command and flag names, are shown. Other errors (a missing title, a bad
+/// `--limit`) keep clap's message; they quote only flags and their values.
+///
+/// ```ignore
+/// terminal.print_error(&shell_usage_error(&err));
+/// ```
+fn shell_usage_error(err: &clap::Error) -> String {
+    let (what, suggestion) = match err.kind() {
+        ErrorKind::InvalidSubcommand => ("unknown command", ContextKind::SuggestedSubcommand),
+        ErrorKind::UnknownArgument => ("unexpected argument", ContextKind::SuggestedArg),
+        _ => return err.render().to_string().trim_end().to_owned(),
+    };
+    let suggested = match err.get(suggestion) {
+        Some(ContextValue::String(name)) => Some(name.as_str()),
+        Some(ContextValue::Strings(names)) => names.first().map(String::as_str),
+        _ => None,
+    };
+    match suggested {
+        Some(name) => format!("vault: {what} (did you mean `{name}`?); type `help` for commands"),
+        None => format!("vault: {what}; type `help` for commands"),
     }
 }
 
@@ -497,14 +532,15 @@ mod signals {
     use crate::commands::SharedSession;
     use crate::terminal::TerminalHandle;
 
-    /// On SIGTERM, SIGHUP, SIGINT or SIGQUIT: wipes the session (recording it in the
-    /// audit log), clears the clipboard,
-    /// restores the terminal if our masked prompt had it in raw mode, and exits with
-    /// 128 + the signal number. If the handler can't be installed, the default action
-    /// (exit without wiping) stays, and a warning is logged.
+    /// On SIGTERM, SIGHUP, SIGINT or SIGQUIT: wipes the session if one is open
+    /// (recording it in the audit log), clears the clipboard, restores the terminal if
+    /// our masked prompt had it in raw mode with bracketed paste, and exits with
+    /// 128 + the signal number. Installed before the first master password prompt,
+    /// while `session` is still empty. If the handler can't be installed, the default
+    /// action (exit without wiping) stays, and a warning is logged.
     ///
     /// ```ignore
-    /// signals::lock_on_termination(Arc::clone(&session), Arc::clone(&handle));
+    /// signals::lock_on_termination(Arc::clone(&session), terminal.handle());
     /// ```
     pub(super) fn lock_on_termination(session: SharedSession, handle: Arc<dyn TerminalHandle>) {
         let mut signals = match Signals::new([SIGTERM, SIGHUP, SIGINT, SIGQUIT]) {
@@ -524,7 +560,15 @@ mod signals {
                     open.lock_on_signal();
                 }
                 handle.clear_clipboard();
-                let _ = crossterm::terminal::disable_raw_mode();
+                // Only the masked prompt enables crossterm's raw mode; undo both of
+                // its switches, as its drop guard would.
+                if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
+                    let _ = crossterm::execute!(
+                        std::io::stderr(),
+                        crossterm::event::DisableBracketedPaste
+                    );
+                    let _ = crossterm::terminal::disable_raw_mode();
+                }
                 std::process::exit(128 + signal);
             }
         });

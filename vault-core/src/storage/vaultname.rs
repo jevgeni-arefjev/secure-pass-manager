@@ -11,9 +11,9 @@ const MAX_LEN: usize = 32;
 /// value is safe to use as a file name inside the vault directory (ADR-0001).
 ///
 /// Security: input is trimmed of surrounding whitespace and lowercased, then must be
-/// 1–32 ASCII letters, digits, `-` or `_`, starting with a letter or digit. Path separators, dots and Windows device names
-/// (`con`, `nul`, `com1`, ...) can never get through, and two names differing only in
-/// case are the same vault, so case-insensitive file systems can't make them collide.
+/// 1–32 ASCII letters, digits, `-` or `_`, starting with a letter or digit. Path separators
+/// and dots can never get through, and two names differing only in case are the same
+/// vault, so case-insensitive file systems (macOS) can't make them collide.
 ///
 /// ```
 /// use vault_core::storage::Vaultname;
@@ -35,7 +35,7 @@ impl Vaultname {
     /// # use vault_core::storage::{StorageError, Vaultname};
     /// assert_eq!(Vaultname::parse("bob-2_work")?.as_str(), "bob-2_work");
     /// assert_eq!(Vaultname::parse(" alice ")?.as_str(), "alice");
-    /// assert_eq!(Vaultname::parse("con"), Err(StorageError::InvalidVaultname));
+    /// assert_eq!(Vaultname::parse("../alice"), Err(StorageError::InvalidVaultname));
     /// # Ok::<(), StorageError>(())
     /// ```
     pub fn parse(input: &str) -> Result<Self, StorageError> {
@@ -44,8 +44,7 @@ impl Vaultname {
             && name.starts_with(|c: char| c.is_ascii_alphanumeric())
             && name
                 .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-            && !is_windows_device_name(&name);
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
         if valid {
             Ok(Self(name))
         } else {
@@ -77,20 +76,5 @@ impl fmt::Display for Vaultname {
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-/// Whether a lowercase `name` is a reserved Windows device name, which can't be used
-/// as a file name there even with an extension.
-///
-/// ```ignore
-/// assert!(is_windows_device_name("com1"));
-/// assert!(!is_windows_device_name("com10"));
-/// ```
-fn is_windows_device_name(name: &str) -> bool {
-    match name.as_bytes() {
-        b"con" | b"prn" | b"aux" | b"nul" => true,
-        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => digit.is_ascii_digit(),
-        _ => false,
     }
 }

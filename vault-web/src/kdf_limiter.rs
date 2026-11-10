@@ -1,5 +1,6 @@
-//! The KDF limiter: unlock and create each cost a 256 MiB Argon2id run, so only a few
-//! run at once, a few more wait, and the rest are turned away.
+//! The KDF limiter: unlock, create and a master password change each cost one or more
+//! 256 MiB Argon2id runs, so only a few run at once, a few more wait, and the rest are
+//! turned away.
 
 use std::sync::Arc;
 

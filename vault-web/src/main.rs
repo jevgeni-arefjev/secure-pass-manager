@@ -1,6 +1,7 @@
 //! `vault-web` server: HTTPS for the browser client. Design: `web-app-security.md`.
 #![forbid(unsafe_code)]
 
+use std::io;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -8,38 +9,98 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use tokio::signal::unix::{SignalKind, signal};
-use vault_core::storage::FileStore;
+use vault_core::storage::{FileStore, StorageError};
 use vault_web::args::Args;
 use vault_web::{App, AppConfig};
 
-/// Entry point: hardens the process before anything else (even the async runtime),
-/// refusing to start if core dumps can't be disabled; then parses flags, sets up
-/// logging and TLS, and serves the app until the process is stopped.
+/// Entry point: installs the JSON diagnostics and the panic hook, then hardens the
+/// process before anything else (even flag parsing and the async runtime), refusing
+/// to start if core dumps can't be disabled; then sets up TLS and serves the app until
+/// the process is stopped. A failure to start is one `startup_failed` JSON line
+/// ([`StartupError`]); a bad flag is clap's usage message.
 ///
 /// ```text
 /// $ vault-web --bind 127.0.0.1:8443
 /// vault-web: serving https://localhost:8443
 /// ```
 fn main() -> ExitCode {
-    if vault_core::crypto::harden_process().is_err() {
-        eprintln!("vault-web: could not disable core dumps; refusing to start");
-        return ExitCode::FAILURE;
-    }
-    let args = Args::parse();
     vault_web::logging::init(std::io::stderr);
     log_panics_without_message();
+    if vault_core::crypto::harden_process().is_err() {
+        return StartupError::new("core_dumps").report();
+    }
+    let args = Args::parse();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
-        Err(err) => {
-            eprintln!("vault-web: could not start the async runtime: {err}");
-            return ExitCode::FAILURE;
-        }
+        Err(err) => return StartupError::with_kind("async_runtime", err.kind()).report(),
     };
     match runtime.block_on(serve(&args)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("vault-web: {message}");
-            ExitCode::FAILURE
+        Err(err) => err.report(),
+    }
+}
+
+/// Why the server couldn't start: a fixed cause name and, for a file system failure,
+/// its [`io::ErrorKind`].
+///
+/// Security: like every other diagnostic (ADR-0014), it carries no path and no OS or
+/// library error text; the operator knows which paths and flags they passed.
+struct StartupError {
+    /// What failed, e.g. `vault_directory` or `tls_key_invalid`.
+    cause: &'static str,
+    /// The file system cause kind, if the failure was one.
+    kind: Option<io::ErrorKind>,
+}
+
+impl StartupError {
+    /// A failure with no file system cause kind.
+    ///
+    /// ```ignore
+    /// return Err(StartupError::new("no_data_directory"));
+    /// ```
+    fn new(cause: &'static str) -> Self {
+        Self { cause, kind: None }
+    }
+
+    /// A file system failure of kind `kind`.
+    ///
+    /// ```ignore
+    /// StartupError::with_kind("bind", err.kind())
+    /// ```
+    fn with_kind(cause: &'static str, kind: io::ErrorKind) -> Self {
+        Self {
+            cause,
+            kind: Some(kind),
+        }
+    }
+
+    /// Logs the failure as one `startup_failed` JSON line and returns the failure exit
+    /// code.
+    ///
+    /// ```ignore
+    /// return StartupError::new("core_dumps").report();
+    /// // {"timestamp":"…","level":"ERROR","event":"startup_failed","cause":"core_dumps"}
+    /// ```
+    fn report(self) -> ExitCode {
+        tracing::error!(
+            event = "startup_failed",
+            cause = self.cause,
+            kind = self.kind.map(tracing::field::debug),
+        );
+        ExitCode::FAILURE
+    }
+}
+
+impl From<vault_web::tls::TlsError> for StartupError {
+    /// The TLS step that failed, by its fixed cause name and kind.
+    ///
+    /// ```ignore
+    /// let tls = vault_web::tls::server_config(&source)?;
+    /// ```
+    fn from(err: vault_web::tls::TlsError) -> Self {
+        Self {
+            cause: err.cause(),
+            kind: err.kind(),
         }
     }
 }
@@ -65,30 +126,28 @@ fn log_panics_without_message() {
 }
 
 /// Prepares the vault directory and TLS from `args`, then serves the app on
-/// `args.bind` until stopped. Errors are one-line messages for the operator.
-///
-/// Security: warns if bound to anything but a loopback address, since other machines
-/// could then reach the server (the Host check still refuses foreign names).
+/// `args.bind` (a loopback address, checked by [`Args`]) until stopped.
 ///
 /// ```ignore
 /// serve(&Args::parse()).await?;
 /// ```
-async fn serve(args: &Args) -> Result<(), String> {
+async fn serve(args: &Args) -> Result<(), StartupError> {
     let data_dir = dirs::data_dir().map(|dir| dir.join("secure-pass-manager"));
+    // Without a platform data directory, --vault-dir (and --tls-cert/--tls-key) say
+    // where to keep things.
     let vault_dir = args
         .vault_dir(data_dir.as_deref())
-        .ok_or("no platform data directory; pass --vault-dir")?;
+        .ok_or(StartupError::new("no_data_directory_for_vaults"))?;
     let cert_source = args
         .cert_source(data_dir.as_deref())
-        .ok_or("no platform data directory; pass --tls-cert and --tls-key")?;
+        .ok_or(StartupError::new("no_data_directory_for_tls"))?;
 
-    FileStore::new(&vault_dir)
-        .map_err(|_| format!("could not open the vault directory {}", vault_dir.display()))?;
-    let tls = vault_web::tls::server_config(&cert_source).map_err(|err| err.to_string())?;
+    FileStore::new(&vault_dir).map_err(|err| match err {
+        StorageError::Io(kind) => StartupError::with_kind("vault_directory", kind),
+        _ => StartupError::new("vault_directory"),
+    })?;
+    let tls = vault_web::tls::server_config(&cert_source)?;
 
-    if !args.bind.ip().is_loopback() {
-        tracing::warn!(event = "bind_not_loopback");
-    }
     let port = args.bind.port();
     let app = App::new(AppConfig::new(vault_dir, port));
     app.spawn_sweeper();
@@ -105,7 +164,7 @@ async fn serve(args: &Args) -> Result<(), String> {
         .handle(handle)
         .serve(app.router().into_make_service())
         .await
-        .map_err(|err| format!("could not serve on {}: {err}", args.bind));
+        .map_err(|err| StartupError::with_kind("bind", err.kind()));
     // Also covers a session opened while the server was stopping, and a serve error.
     lock_all_on_shutdown(&app).await;
     served

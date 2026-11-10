@@ -18,10 +18,12 @@ pub const DEFAULT_SESSION_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
 /// under the shortest idle timeout (1 minute), so keys don't outlive it by much.
 pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
-/// How many unlocks or creates may derive keys at once (256 MiB Argon2id each).
+/// How many unlocks, creates or master password changes may derive keys at once
+/// (256 MiB Argon2id per run).
 pub const DEFAULT_KDF_CONCURRENCY: usize = 2;
 
-/// How many unlocks or creates may wait for a KDF slot before further ones get a 503.
+/// How many unlocks, creates or master password changes may wait for a KDF slot
+/// before further ones get a 503.
 pub const DEFAULT_KDF_QUEUE: usize = 2;
 
 /// The vault format new vaults are created in by `POST /api/vaults`.

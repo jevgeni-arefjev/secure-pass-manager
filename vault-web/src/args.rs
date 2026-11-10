@@ -1,7 +1,8 @@
 //! The `vault-web` command line: where to listen, where the vaults are, and which TLS
 //! certificate to serve.
 //!
-//! Security: no flag ever carries a master password or other secret.
+//! Security: no flag ever carries a master password or other secret, and `--bind`
+//! only accepts a loopback address, so other machines can't reach the server.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -33,8 +34,8 @@ const WEB_TLS: &str = "web-tls";
 #[derive(Debug, Parser)]
 #[command(name = "vault-web", version, long_about = None)]
 pub struct Args {
-    /// Address to listen on
-    #[arg(long, value_name = "ADDR", default_value = DEFAULT_BIND)]
+    /// Loopback address to listen on, e.g. 127.0.0.1:9443
+    #[arg(long, value_name = "ADDR", default_value = DEFAULT_BIND, value_parser = parse_loopback)]
     pub bind: SocketAddr,
 
     /// Directory holding the web vaults [default: the platform data directory's web-vaults]
@@ -91,5 +92,30 @@ impl Args {
                 cache_dir: dir.join(WEB_TLS),
             }),
         }
+    }
+}
+
+/// Parses `--bind`: an `address:port` whose address is loopback (`127.0.0.0/8` or
+/// `[::1]`).
+///
+/// Security: the web app is a local demo with no unlock lockout; bound to a network
+/// address, any machine that can reach it could guess master passwords (the Host check
+/// only stops DNS rebinding, not a client that sends `Host: localhost`).
+///
+/// ```ignore
+/// assert!(parse_loopback("127.0.0.1:9443").is_ok());
+/// assert!(parse_loopback("0.0.0.0:8443").is_err());
+/// ```
+fn parse_loopback(value: &str) -> Result<SocketAddr, String> {
+    let addr: SocketAddr = value
+        .parse()
+        .map_err(|_| "expected an address with a port, e.g. 127.0.0.1:8443".to_owned())?;
+    if addr.ip().is_loopback() {
+        Ok(addr)
+    } else {
+        Err(
+            "must be a loopback address (127.0.0.1 or [::1]); vault-web serves this machine only"
+                .to_owned(),
+        )
     }
 }

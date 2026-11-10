@@ -13,7 +13,7 @@ fn each_event_code_is_one_sentence() {
         ),
         (
             "audit_log_permissions_loose",
-            "vault: warning: the audit log of vault 'alice' is writable by other users; run `chmod go-w` on it",
+            "vault: warning: the audit log of vault 'alice' is readable or writable by other users; run `chmod go-rw` on it",
         ),
         (
             "memory_lock_unavailable",
@@ -29,7 +29,7 @@ fn each_event_code_is_one_sentence() {
         ),
         (
             "vault_file_permissions_loose",
-            "vault: warning: the vault file of vault 'alice' is writable by other users; run `chmod go-w` on it",
+            "vault: warning: the vault file of vault 'alice' is readable or writable by other users; run `chmod go-rw` on it",
         ),
         (
             "vault_temp_cleanup_failed",
@@ -63,7 +63,9 @@ fn the_vaultname_is_named_only_for_the_vaults_own_files() {
     );
     assert_eq!(
         diagnostics::sentence("vault_file_permissions_loose", None).as_deref(),
-        Some("vault: warning: the vault file is writable by other users; run `chmod go-w` on it")
+        Some(
+            "vault: warning: the vault file is readable or writable by other users; run `chmod go-rw` on it"
+        )
     );
 }
 
@@ -79,6 +81,20 @@ fn an_unknown_code_is_printed_as_the_bare_code() {
 fn an_internal_error_is_not_printed_again() {
     // The CLI already shows the error itself: `vault: vault storage failed (disk full)`.
     assert_eq!(diagnostics::sentence("internal_error", None), None);
+    assert_eq!(diagnostics::internal_error_sentence(None), None);
+}
+
+#[test]
+fn an_unworded_internal_error_kind_is_printed_by_name() {
+    // After `vault: vault storage failed (unexpected file system error)`.
+    assert_eq!(
+        diagnostics::internal_error_sentence(Some("NotADirectory")).as_deref(),
+        Some("vault: the exact cause was `NotADirectory`")
+    );
+    assert_eq!(
+        diagnostics::internal_error_sentence(Some("not a kind: /home/x")),
+        None
+    );
 }
 
 #[cfg(unix)]
@@ -105,7 +121,8 @@ fn the_binary_prints_a_loose_vault_file_as_a_sentence() {
     .unwrap()
     .lock();
     let file = dir.path().join("alice/secrets.vault");
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
+    // Readable by others only: a world-readable vault file is loose too.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
 
     // `init` of a taken vaultname loads the vault file before any prompt.
     let output = Command::new(env!("CARGO_BIN_EXE_vault"))
@@ -120,7 +137,7 @@ fn the_binary_prints_a_loose_vault_file_as_a_sentence() {
     assert_eq!(
         stderr.lines().next(),
         Some(
-            "vault: warning: the vault file of vault 'alice' is writable by other users; run `chmod go-w` on it"
+            "vault: warning: the vault file of vault 'alice' is readable or writable by other users; run `chmod go-rw` on it"
         ),
         "{stderr}"
     );
@@ -158,4 +175,36 @@ fn a_panic_prints_only_its_location() {
     let (file, number) = location.rsplit_once(':').unwrap();
     assert!(file.ends_with("tests/diagnostics.rs"), "{line}");
     assert!(number.parse::<u32>().is_ok(), "{line}");
+}
+
+#[test]
+fn the_binary_prints_an_unworded_cause_kind_after_the_message() {
+    use std::process::{Command, Stdio};
+
+    // A file where the vault directory should be: a kind the CLI has no words for.
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_dir = dir.path().join("vaults");
+    std::fs::write(&not_a_dir, b"").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vault"))
+        .arg("--vault-dir")
+        .arg(&not_a_dir)
+        .args(["unlock", "alice"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let lines: Vec<&str> = stderr.lines().collect();
+
+    assert_eq!(lines.len(), 2, "{stderr}");
+    assert!(
+        lines[0].ends_with("(unexpected file system error)"),
+        "{stderr}"
+    );
+    // The kind is the platform's (`AlreadyExists` on Linux), named but never worded.
+    assert!(
+        lines[1].starts_with("vault: the exact cause was `"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&*dir.path().to_string_lossy()), "{stderr}");
 }

@@ -354,8 +354,9 @@ fn pad(out: &mut String, n: usize) {
 
 /// The cause kind of an internal failure in words, as the CLI shows it after the
 /// generic message (ADR-0014): `vault storage failed (disk full)`. Only a fixed set of
-/// kinds is worded; any other is "unexpected file system error", with the exact kind
-/// only in the diagnostic.
+/// kinds is worded ([`is_worded`]); any other is "unexpected file system error", and
+/// the exact kind follows in the `internal_error` diagnostic
+/// ([`crate::diagnostics`]).
 ///
 /// Security: fixed text, never the OS error message (which can carry a path).
 ///
@@ -367,13 +368,34 @@ fn pad(out: &mut String, n: usize) {
 /// ```
 #[must_use]
 pub fn cause_kind(kind: ErrorKind) -> &'static str {
-    match kind {
+    worded(kind).unwrap_or("unexpected file system error")
+}
+
+/// Whether [`cause_kind`] has words of its own for `kind`.
+///
+/// ```
+/// use std::io::ErrorKind;
+/// assert!(vault_cli::render::is_worded(ErrorKind::StorageFull));
+/// assert!(!vault_cli::render::is_worded(ErrorKind::NotADirectory));
+/// ```
+#[must_use]
+pub fn is_worded(kind: ErrorKind) -> bool {
+    worded(kind).is_some()
+}
+
+/// The words for `kind`, if it is one of the fixed set.
+///
+/// ```ignore
+/// assert_eq!(worded(ErrorKind::StorageFull), Some("disk full"));
+/// ```
+fn worded(kind: ErrorKind) -> Option<&'static str> {
+    Some(match kind {
         ErrorKind::StorageFull => "disk full",
         ErrorKind::PermissionDenied => "permission denied",
         ErrorKind::ReadOnlyFilesystem => "read-only file system",
         LOCK_HELD_TOO_LONG => "vault is busy in another session",
-        _ => "unexpected file system error",
-    }
+        _ => return None,
+    })
 }
 
 /// Every problem of a refused save, one per line under a heading, each labelled with

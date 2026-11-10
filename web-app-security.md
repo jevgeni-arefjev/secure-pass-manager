@@ -50,7 +50,7 @@ Server holds an unwrapped key for the life of a session; decryption stays on the
 
 - Host check: only `localhost` and `127.0.0.1` on the server's port are accepted (DNS rebinding)
 
-- Unlock and vault creation each cost a 256 MiB Argon2id run, so at most two run at once; further requests are refused
+- Unlock, vault creation and a master password change each cost 256 MiB Argon2id runs, so at most two run at once and two more wait; further requests are refused with `503` (server busy)
 
 There is no SQL anywhere: vaults are flat files (ADR-0011), so there is no query to inject into.
 
@@ -77,7 +77,7 @@ Master-password, vault-at-rest and vault-in-memory analysis in `secure-password-
 | Access control | Request naming another user's secret | Vault resolved from the session only; the server opens only that vault file, so other users' secrets are unreachable; unknown secret returns 404 |
 | Injection | Vaultname used as a vault file name (path traversal) | Vaultnames allowlisted (restricted charset and length); vault path built only inside the vault directory |
 | Injection | Malicious input reaching a query or rendered as markup | No query language (flat vault files, ADR-0011); validation, no inline scripts |
-| Transport | DNS rebinding: a malicious site's domain resolving to the local server | Host header check, server bound to localhost |
+| Transport | DNS rebinding: a malicious site's domain resolving to the local server | Host header check, server bound to localhost (`--bind` refuses non-loopback addresses) |
 | Availability | Flood of unlock requests exhausting memory (256 MiB per KDF run) | At most two KDF runs at once, a short queue, then 503 |
 | Interface | Copied password left on the clipboard | Cleared after 20 seconds, best-effort: the browser only allows it while the page has focus |
 
@@ -97,7 +97,7 @@ Master-password, vault-at-rest and vault-in-memory analysis in `secure-password-
 | A10 Mishandling of Exceptional Conditions	| Generic error messages with no internals; a panicking request locks that session and returns a generic 500; a save conflict locks the session (401) |
 
 
-## 5. Planned pages
+## 5. Pages
 
 ```
 - Create vault  vaultname + master password, strength floor; creates the vault file
@@ -105,13 +105,14 @@ Master-password, vault-at-rest and vault-in-memory analysis in `secure-password-
 - Vault list    non-hidden fields only: title, username, URL, tags; search over them
 - Secret detail hidden fields masked; per-field Reveal and Copy buttons
 - Secret edit   add / edit / delete; an empty password is generated on the server; title read-only when editing
-- Settings      (planned) clipboard timeout, TOTP enrolment, KDF upgrade, backup export, master password change, account management
+- Settings      master password change, backup download (the encrypted vault file); (planned) clipboard timeout, TOTP enrolment, KDF upgrade
+- Audit log     the vault's audit events, newest first
 ```
 
 ## 6. Build and run
 `vault-web` serves the compiled bundle from the same binary and terminates TLS itself. Without `--tls-cert`/`--tls-key` it generates and caches a self-signed `localhost` certificate; pass a `mkcert` certificate to avoid the browser warning.
 ```bash
-cd web && npm install && npm run build         # emits the bundle into vault-web/assets
+cd web && npm ci && npm run build              # emits the bundle into vault-web/assets
 cargo run -p vault-web                         # serves HTTPS on 127.0.0.1:8443, prints the URL once
 cargo run -p vault-web -- --tls-cert localhost.pem --tls-key localhost-key.pem
 ```
