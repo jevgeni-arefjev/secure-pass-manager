@@ -288,6 +288,8 @@ fn show(out: &mut impl Write, echo: Echo) -> io::Result<()> {
     out.flush()
 }
 
+// An exception to tests living in `tests/` (CODING_STANDARDS.md): this checks private
+// behaviour with no public seam.
 #[cfg(test)]
 mod tests {
     use super::*;

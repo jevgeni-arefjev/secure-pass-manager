@@ -1259,6 +1259,27 @@ fn auto_lock_conflict_and_signal_locks_are_recorded() {
 }
 
 #[test]
+fn an_auto_lock_by_the_front_end_is_recorded_once() {
+    let fx = Fixture::new();
+    let session = fx.create();
+
+    session.auto_lock();
+
+    assert_eq!(fx.events("alice"), [Event::VaultCreated, Event::AutoLocked]);
+}
+
+#[test]
+fn an_auto_lock_after_the_idle_timeout_already_ran_records_nothing_more() {
+    let fx = Fixture::new();
+    let session = fx.create();
+    fx.clock.advance(DEFAULT_IDLE_TIMEOUT);
+
+    session.auto_lock();
+
+    assert_eq!(fx.events("alice"), [Event::VaultCreated, Event::AutoLocked]);
+}
+
+#[test]
 fn master_password_changes_are_recorded_whether_they_succeed_or_not() {
     let fx = Fixture::new();
     let mut session = fx.create();

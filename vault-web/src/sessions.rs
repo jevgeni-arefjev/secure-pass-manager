@@ -10,7 +10,7 @@
 //!   lookups never compare the secret and logs can carry a short hash of it.
 //! - A session that has auto-locked (idle timeout) or outlived the absolute lifetime is
 //!   removed and wiped on its next lookup, or by the periodic sweep, whichever comes
-//!   first.
+//!   first; both are recorded as an auto-lock.
 //!
 //! Every method that takes a session's vault mutex (a lookup, a lock, a request's
 //! vault work) may wait for another request's save, backup or master password change,
@@ -284,6 +284,22 @@ impl WebSession {
         drop(self.vault().take());
     }
 
+    /// Locks the vault and wipes its keys because the session has auto-locked or
+    /// outlived the absolute lifetime, recorded in the audit log as an auto-lock (once:
+    /// an idle auto-lock has already recorded it); later calls do nothing.
+    ///
+    /// Blocks while another request holds the vault; run it on the blocking pool
+    /// ([`off_worker`]).
+    ///
+    /// ```ignore
+    /// session.auto_lock();
+    /// ```
+    fn auto_lock(&self) {
+        if let Some(session) = self.vault().take() {
+            session.auto_lock();
+        }
+    }
+
     /// Locks the vault and wipes its keys because the server is stopping, recorded in
     /// the audit log as a termination signal; later calls do nothing.
     ///
@@ -465,8 +481,23 @@ impl Sessions {
         if session.is_alive(self.clock.now(), self.lifetime) {
             Some(session)
         } else {
-            self.remove(key);
+            self.auto_lock(key);
             None
+        }
+    }
+
+    /// Removes the session under `key`, if any, and locks it as auto-locked
+    /// ([`WebSession::auto_lock`]).
+    ///
+    /// Blocks while a request holds the session's vault; run it on the blocking pool.
+    ///
+    /// ```ignore
+    /// self.auto_lock(key); // after is_alive said no
+    /// ```
+    fn auto_lock(&self, key: SessionKey) {
+        let removed = self.map().remove(&key);
+        if let Some(session) = removed {
+            session.auto_lock();
         }
     }
 
@@ -488,7 +519,8 @@ impl Sessions {
     /// event ([`WebSession::end_after_panic`]).
     ///
     /// Security: only for a session whose request panicked (ADR-0014); every other end
-    /// of a session is a [`Sessions::remove`], which records the lock.
+    /// of a session is a [`Sessions::remove`] or [`Sessions::auto_lock`], which records the
+    /// lock.
     ///
     /// Blocks while a request holds the session's vault; run it on the blocking pool.
     ///
@@ -503,7 +535,7 @@ impl Sessions {
     }
 
     /// Ends every session that has auto-locked or outlived the absolute lifetime:
-    /// removes it and wipes its keys. Returns how many ended.
+    /// removes it and wipes its keys, recorded as an auto-lock. Returns how many ended.
     ///
     /// Blocks while a request holds a session's vault; run it on the blocking pool.
     ///
@@ -520,7 +552,7 @@ impl Sessions {
         let mut ended = 0;
         for (key, session) in snapshot {
             if !session.is_alive(now, self.lifetime) {
-                self.remove(key);
+                self.auto_lock(key);
                 ended += 1;
             }
         }

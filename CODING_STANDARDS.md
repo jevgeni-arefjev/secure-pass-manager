@@ -21,4 +21,5 @@ The judgement calls a reviewer checks in every diff. Rules a tool already enforc
 ## Tests
 
 - Tests sit in each crate's `tests/` and go through the public API: the vault shell through `shell::run` with the scripted fake terminal, the server through HTTP, the web client through its pure helpers.
+  Exceptions, kept as `#[cfg(test)] mod tests` in `src/` because what they check is private and has no public seam: `vault-core/src/crypto/secret_memory.rs` (the locked buffer's wipe and page alignment, which no public API can observe) and `vault-cli/src/terminal/masked.rs` (the masked reader's key handling, which the public prompt only reaches through a real raw-mode terminal). Don't add more without the same reason.
 - Expected values are literals from the spec or a worked example, not recomputed the way the code computes them.

@@ -321,6 +321,8 @@ impl Plaintext {
     }
 }
 
+// An exception to tests living in `tests/` (CODING_STANDARDS.md): this checks private
+// behaviour with no public seam.
 #[cfg(test)]
 mod tests {
     use super::*;

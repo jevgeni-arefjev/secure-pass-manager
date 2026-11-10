@@ -10,6 +10,10 @@
 //!   disguise what is printed. The core refuses them on save; this also covers vaults
 //!   written by other builds and secrets saved under older rules.
 //! - A masked hidden field is shown as a single `*`, whatever its length (ADR-0008).
+//!   A shown one (`get --show`) is escaped the same way, and since it is stored exactly
+//!   (ADR-0013) and may hold a `\` of its own, `\` is shown as `\\` too
+//!   ([`escape_hidden`]): an escape in the output always stands for one character.
+//!   `--copy` is the exact path.
 //! - Output is returned in zeroizing strings, like the fields it is built from.
 
 use std::fmt::{Display, Write};
@@ -36,7 +40,8 @@ const MAX_COLUMN_WIDTH: usize = 32;
 pub enum Reveal {
     /// Every hidden field shows as `*` (the default).
     Masked,
-    /// Hidden fields show their value (`get --show`).
+    /// Hidden fields show their value (`get --show`), with invisible characters and
+    /// `\` as escapes.
     Shown,
 }
 
@@ -53,10 +58,34 @@ pub enum Reveal {
 /// ```
 #[must_use]
 pub fn escape(text: &str, multiline: bool) -> Zeroizing<String> {
+    escape_where(text, |c| is_unsafe_char(c, multiline))
+}
+
+/// A shown hidden value: like [`escape`] on one line, and with every `\` shown as
+/// `\\`, so a value holding the text `\xad` can't be mistaken for one holding U+00AD.
+///
+/// Security: the result holds the hidden value; let it drop straight after printing.
+///
+/// ```ignore
+/// assert_eq!(escape_hidden("a\\xad\u{ad}").as_str(), r"a\\xad\xad");
+/// ```
+fn escape_hidden(value: &str) -> Zeroizing<String> {
+    escape_where(value, |c| c == '\\' || is_unsafe_char(c, false))
+}
+
+/// `text` with every character for which `escaped` holds replaced by a visible escape:
+/// `\\` for a backslash, `\x..` up to U+00FF, else `\u{..}`.
+///
+/// ```ignore
+/// let out = escape_where(text, |c| is_unsafe_char(c, false));
+/// ```
+fn escape_where(text: &str, escaped: impl Fn(char) -> bool) -> Zeroizing<String> {
     let mut out = Zeroizing::new(String::with_capacity(text.len()));
     for c in text.chars() {
-        if !is_unsafe_char(c, multiline) {
+        if !escaped(c) {
             out.push(c);
+        } else if c == '\\' {
+            out.push_str("\\\\");
         } else if u32::from(c) <= 0xff {
             let _ = write!(out, "\\x{:02x}", u32::from(c));
         } else {
@@ -91,7 +120,7 @@ where
 {
     let hidden = |value: &HiddenValue| match reveal {
         Reveal::Masked => Zeroizing::new(MASK.to_owned()),
-        Reveal::Shown => escape(value.reveal(), false),
+        Reveal::Shown => escape_hidden(value.reveal()),
     };
     let mut rows: Vec<(Zeroizing<String>, Zeroizing<String>)> = Vec::new();
     let mut row = |label: &str, value: Zeroizing<String>| {
@@ -234,7 +263,7 @@ where
 /// What an audit event means, in words, without its title.
 ///
 /// ```ignore
-/// assert_eq!(describe(&Event::AutoLocked), "locked (idle)");
+/// assert_eq!(describe(&Event::AutoLocked), "auto-locked");
 /// ```
 fn describe(event: &Event) -> &'static str {
     match event {
@@ -242,7 +271,7 @@ fn describe(event: &Event) -> &'static str {
         Event::Unlocked => "unlocked",
         Event::UnlockFailed => "unlock failed (wrong master password)",
         Event::Locked => "locked",
-        Event::AutoLocked => "locked (idle)",
+        Event::AutoLocked => "auto-locked",
         Event::LockedOnConflict => "locked (changed by another session)",
         Event::TerminatedBySignal => "locked (terminated by signal)",
         Event::SecretAdded { .. } => "secret added",

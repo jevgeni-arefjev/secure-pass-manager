@@ -5,7 +5,7 @@
     { "event": { "kind": "unlocked" }, "shown": "unlocked" },
     { "event": { "kind": "unlock_failed" }, "shown": "unlock failed (wrong master password)" },
     { "event": { "kind": "locked" }, "shown": "locked" },
-    { "event": { "kind": "auto_locked" }, "shown": "locked (idle)" },
+    { "event": { "kind": "auto_locked" }, "shown": "auto-locked" },
     { "event": { "kind": "locked_on_conflict" }, "shown": "locked (changed by another session)" },
     { "event": { "kind": "terminated_by_signal" }, "shown": "locked (terminated by signal)" },
     { "event": { "kind": "secret_added", "title": "GitHub" }, "shown": "secret added" },

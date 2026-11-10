@@ -79,9 +79,31 @@ async fn sweep_ends_an_active_session_eight_hours_after_unlock() {
     app.sweep();
 
     assert_eq!(app.session_count(), 0);
-    assert!(app.audit_log("alice").contains("\"locked\""));
+    let audit_log = app.audit_log("alice");
+    assert!(audit_log.contains("\"auto_locked\""), "{audit_log}");
+    assert!(!audit_log.contains("\"locked\""), "{audit_log}");
     let response = app.send(alice.get("/api/secrets")).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_request_eight_hours_after_unlock_gets_401_and_records_an_auto_lock() {
+    let app = TestApp::new();
+    let body =
+        json!({"vaultname": "alice", "master_password": PASSWORD, "idle_timeout_minutes": 60});
+    let alice = Unlocked::from_response(app.send(post_json("/api/vaults", &body)).await).await;
+    for _ in 0..10 {
+        app.clock.sleep(48 * MINUTE);
+        app.send(alice.get("/api/secrets")).await;
+    }
+
+    let response = app.send(alice.get("/api/secrets")).await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(app.session_count(), 0);
+    let audit_log = app.audit_log("alice");
+    assert!(audit_log.contains("\"auto_locked\""), "{audit_log}");
+    assert!(!audit_log.contains("\"locked\""), "{audit_log}");
 }
 
 #[tokio::test]

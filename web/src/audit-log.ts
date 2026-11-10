@@ -32,7 +32,7 @@ const DESCRIPTIONS: Readonly<Record<string, string>> = {
   unlocked: "unlocked",
   unlock_failed: "unlock failed (wrong master password)",
   locked: "locked",
-  auto_locked: "locked (idle)",
+  auto_locked: "auto-locked",
   locked_on_conflict: "locked (changed by another session)",
   terminated_by_signal: "locked (terminated by signal)",
   secret_added: "secret added",

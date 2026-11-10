@@ -175,6 +175,16 @@ fn shown_view_reveals_every_hidden_field() {
 }
 
 #[test]
+fn shown_view_escapes_invisible_characters_and_backslashes_in_hidden_values() {
+    let secret = Secret::new("GitHub")
+        .with_password(hidden("zero\u{200b}width"))
+        .with_custom_field(CustomField::hidden("pin", hidden(r"literal\xad")));
+    let view = render::secret(&secret, Reveal::Shown, &Utc);
+    assert!(view.contains(r"password: zero\u{200b}width"));
+    assert!(view.ends_with(r"pin:      literal\\xad"));
+}
+
+#[test]
 fn view_leaves_out_fields_that_are_not_set() {
     let view = render::secret(&Secret::new("bare"), Reveal::Masked, &Utc);
     assert_eq!(view.as_str(), "title: bare");

@@ -76,7 +76,7 @@ Course deliverables:
 │       ├── clipboard.rs    # `--copy`: excluded from clipboard history, cleared after 20 s, on lock and exit
 │       ├── terminal.rs     # Terminal trait (fakeable in tests) and the real stdin/stdout one; in-memory history only
 │       ├── terminal/       # masked prompt: one `*` per character, zeroizing buffer (ADR-0008)
-│       └── render.rs       # get view, list table, log view and every problem of a refused save; escapes exactly the characters the core refuses; hidden fields shown as `*`
+│       └── render.rs       # get view, list table, log view and every problem of a refused save; escapes exactly the characters the core refuses; hidden fields shown as `*`, or with `--show` escaped, `\` as `\\` too
 ├── vault-web/              # `vault-web` binary: HTTPS server for the browser client
 │   ├── build.rs            # embeds assets/ into the binary at compile time; never runs npm
 │   ├── assets/             # client bundle from `npm run build` in web/ (not committed)
@@ -239,7 +239,8 @@ Both front ends save through the same core rules (ADR-0013); a refused save list
 - Lengths count characters, not bytes.
 - Fields that aren't hidden refuse control characters (notes allow newline and tab), every Unicode format character (zero-width characters, bidirectional controls, soft hyphen, tag characters, ...) and the line and paragraph separators, so nothing invisible can disguise a title or drive the terminal. They are stored NFC-normalised, and the single-line ones (all but notes) have surrounding spaces trimmed and must hold more than spaces.
 - Hidden fields (the password and hidden custom fields) are stored exactly as entered, byte for byte, surrounding spaces included; they refuse only control characters.
-- A vault saved under older, looser rules still opens: such a secret lists, shows (with unsafe characters as visible escapes such as `\u{202e}`), reveals and deletes, but saving it is refused with a message naming the field. Fix that field and save again. A title that breaks a rule can't be fixed in place (the web edit form keeps the title read-only): recreate the secret under a new title (CLI: `get <old title> --show`, then `save <new title>` and enter its fields again; web: **Add secret**, then copy the fields over, revealing hidden ones one at a time), check it, then delete the old one (`rm <old title>`, or **Delete** on the web).
+- `get --show` prints a hidden value with the same visible escapes (`\u{200b}`, `\xad`) for invisible characters, and every `\` as `\\`, so an escape always stands for one character: a password typed as `a\b` shows as `a\\b`. `get --copy` copies the exact password, and the web reveal or copy gives any hidden field exactly.
+- A vault saved under older, looser rules still opens: such a secret lists, shows (with unsafe characters as visible escapes such as `\u{202e}`), reveals and deletes, but saving it is refused with a message naming the field. Fix that field and save again. A title that breaks a rule can't be fixed in place (the web edit form keeps the title read-only): recreate the secret under a new title (CLI: `get <old title>`, then `save <new title>` and enter its fields again, taking the password from `get <old title> --copy` and hidden custom fields from `--show`, where `\\` stands for one `\`; web: **Add secret**, then copy the fields over, revealing hidden ones one at a time), check it, then delete the old one (`rm <old title>`, or **Delete** on the web).
 
 ### Tests and checks
 

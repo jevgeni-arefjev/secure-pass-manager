@@ -76,7 +76,7 @@ _Avoid_: logout, log out
 The period between unlock and lock, while a vault is open.
 
 **Auto-lock**:
-Locking a vault automatically after an idle timeout.
+Locking a vault automatically: after an idle timeout, or (web) 8 hours after unlock whatever the activity.
 _Avoid_: auto-logout
 
 **Vault shell**:

@@ -1053,6 +1053,28 @@ impl<S: VaultStore> Session<S> {
         self.lock_recording(Event::TerminatedBySignal);
     }
 
+    /// Locks the vault because a limit the front end sets has run out (vault-web's
+    /// absolute session lifetime), like [`Session::lock`] but recorded as an auto-lock.
+    /// A session that already auto-locked on its idle timeout records nothing more.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use vault_core::audit::MemorySink;
+    /// # use vault_core::crypto::MasterPassword;
+    /// # use vault_core::session::{Session, SessionConfig};
+    /// # use vault_core::storage::FileStore;
+    /// # let dir = tempfile::tempdir()?;
+    /// # let password = MasterPassword::new("correct horse battery".into());
+    /// let session = Session::create_insecure_for_tests(
+    ///     FileStore::new(dir.path())?, "alice", &password, SessionConfig::new(Arc::new(MemorySink::default())),
+    /// )?;
+    /// session.auto_lock(); // e.g. 8 h after unlock
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn auto_lock(self) {
+        self.lock_recording(Event::AutoLocked);
+    }
+
     /// Ends the session, recording `event` if it was still unlocked (an auto-lock or
     /// conflict was already recorded).
     ///

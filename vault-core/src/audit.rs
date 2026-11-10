@@ -66,7 +66,8 @@ pub enum Event {
     UnlockFailed,
     /// The owner locked the vault.
     Locked,
-    /// The vault locked itself after the idle timeout.
+    /// The vault locked itself: after the idle timeout, or (web) at the end of the
+    /// absolute session lifetime.
     AutoLocked,
     /// Another session saved first, so this one locked.
     LockedOnConflict,
