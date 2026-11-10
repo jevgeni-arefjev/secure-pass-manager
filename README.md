@@ -19,9 +19,9 @@ Course deliverables:
 - [x] Basic secure authentication (Argon2id-based unlock, no stored hash; see ADR-0002) and secure session management.
 - [x] Application served over TLS in the development setup.
 - [x] Full input validation and sanitization on all fields.
-- [ ] Structured logging of key events and secure error handling.
+- [x] Structured logging of key events and secure error handling.
 - [x] Per-user access control: a session can only open the vault it unlocked (ADR-0001).
-- [ ] Test cases written and passing, including input-validation edge cases and memory handling checks.
+- [x] Test cases written and passing, including input-validation edge cases and memory handling checks.
 - [ ] User manual for the CLI and the web app.
 - [ ] Reports: encryption methods, memory management, authentication and security features, how SQL injection, XSS and CSRF are prevented, and test results.
 
