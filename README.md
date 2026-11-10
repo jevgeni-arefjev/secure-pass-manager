@@ -47,7 +47,7 @@ Course deliverables:
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
 │   ├── tests/backup.rs     # backup destinations, Session::backup and Session::backup_file, through the public API
 │   ├── tests/generator.rs  # password generator behaviour, through its public API
-│   ├── tests/memory.rs     # page locking of every secret type, the zeroize-only fallback and its warning, core dumps off
+│   ├── tests/memory.rs     # page locking of every secret type, the zeroize-only fallback and its warning, core dumps off (`RLIMIT_CORE` 0, non-dumpable)
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)
@@ -285,7 +285,7 @@ Open the printed URL. Without Node, `cargo run -p vault-web` still builds and ru
 
 - Only requests addressed to `localhost:<port>` or `127.0.0.1:<port>` are served (DNS rebinding defence); every response carries a strict CSP with Trusted Types, short HSTS (`max-age=300`) and `Cache-Control: no-store`.
 - A backup downloaded from the settings page is the encrypted vault file and opens with the master password the vault had when it was made. There is no restore in the browser: as with the CLI, create a vault home in the vault directory (e.g. `web-vaults/alice/`, mode `700`) and put the backup in it as `secrets.vault`; any vaultname works.
-- The server refuses to start if it can't disable core dumps. Diagnostics go to stderr as JSON lines at a fixed `INFO` level (`RUST_LOG` is ignored); a failure to start is one `startup_failed` line with a fixed cause and, for a file, its kind, never the path (`{"event":"startup_failed","cause":"tls_file","kind":"NotFound"}`). Request lines hold the method, route template, status, latency and a short hash of the session ID only:
+- The server refuses to start if it can't disable core dumps (`RLIMIT_CORE` = 0; on Linux also non-dumpable via `PR_SET_DUMPABLE`, so a piped crash handler gets nothing). Diagnostics go to stderr as JSON lines at a fixed `INFO` level (`RUST_LOG` is ignored); a failure to start is one `startup_failed` line with a fixed cause and, for a file, its kind, never the path (`{"event":"startup_failed","cause":"tls_file","kind":"NotFound"}`). Request lines hold the method, route template, status, latency and a short hash of the session ID only:
 
   ```text
   {"timestamp":"2026-11-08T10:00:00.000000Z","level":"INFO","event":"request","method":"GET","route":"/api/secrets/{title}","status":200,"latency_ms":1.2,"session":"3f9a1c0e"}

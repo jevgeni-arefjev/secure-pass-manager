@@ -322,8 +322,15 @@ fn next_revision(header: &Header) -> Result<u64, CryptoError> {
 }
 
 /// Process-wide memory hardening; call it first thing in `main`, before any secret
-/// exists. Disables core dumps (`RLIMIT_CORE` = 0) so a crash can't write keys or
-/// decrypted secrets to disk. No-op on non-Unix platforms.
+/// exists, and refuse to run if it fails.
+///
+/// Security: keeps a crash from writing keys or decrypted secrets to disk. On Unix it
+/// sets `RLIMIT_CORE` to 0. On Linux it also marks the process non-dumpable
+/// (`PR_SET_DUMPABLE` = 0): the kernel doesn't apply `RLIMIT_CORE` when
+/// `core_pattern` pipes to a crash handler (systemd-coredump, apport), but it checks
+/// the dumpable flag before every dump; the flag also blocks same-user `ptrace`
+/// attach. macOS has no such flag, so `RLIMIT_CORE` is the only mechanism there. Fails
+/// if any step fails.
 ///
 /// ```
 /// vault_core::crypto::harden_process().expect("could not disable core dumps");
@@ -331,6 +338,8 @@ fn next_revision(header: &Header) -> Result<u64, CryptoError> {
 pub fn harden_process() -> std::io::Result<()> {
     #[cfg(unix)]
     rlimit::setrlimit(rlimit::Resource::CORE, 0, 0)?;
+    #[cfg(target_os = "linux")]
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
     Ok(())
 }
 

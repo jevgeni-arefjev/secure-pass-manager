@@ -1,16 +1,17 @@
 //! Memory handling of secrets, observed from outside the process's code: page locking
 //! (`mlock`) of every secret type, the zeroize-only fallback when the OS refuses to
-//! lock, its one warning, and disabled core dumps.
+//! lock, its one warning, and disabled core dumps (`RLIMIT_CORE` and the dumpable flag).
 //!
-//! The limits changed here (`RLIMIT_MEMLOCK`, `RLIMIT_CORE`) are process-wide, so this
-//! file holds a single test that runs its steps in order; other test files run in
-//! their own processes and are unaffected.
+//! The limits and flag changed here (`RLIMIT_MEMLOCK`, `RLIMIT_CORE`,
+//! `PR_SET_DUMPABLE`) are process-wide, so this file holds a single test that runs its
+//! steps in order; other test files run in their own processes and are unaffected.
 #![cfg(target_os = "linux")]
 
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use rlimit::Resource;
+use rustix::process::{self, DumpableBehavior};
 use tempfile::TempDir;
 use tracing_subscriber::fmt::MakeWriter;
 use vault_core::audit::MemorySink;
@@ -155,9 +156,14 @@ fn unlock_and_save(dir: &TempDir) -> String {
 
 #[test]
 fn secrets_are_locked_out_of_swap_or_fall_back_to_zeroize_with_one_warning() {
-    // Core dumps: hardening sets both limits to 0, so a crash writes no secrets.
+    // Core dumps: hardening sets both limits to 0 and marks the process non-dumpable,
+    // so a crash writes no secrets, not even to a piped crash handler.
     crypto::harden_process().unwrap();
     assert_eq!(Resource::CORE.get().unwrap(), (0, 0));
+    assert_eq!(
+        process::dumpable_behavior().unwrap(),
+        DumpableBehavior::NotDumpable
+    );
 
     let dir = TempDir::new().unwrap();
     Session::create_insecure_for_tests(

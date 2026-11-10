@@ -2246,6 +2246,7 @@ dependencies = [
  "proptest",
  "region",
  "rlimit",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
