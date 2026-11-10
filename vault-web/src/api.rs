@@ -248,7 +248,7 @@ impl ApiError {
 /// an unknown title 404, anything else a generic 500 ([`session_internal_error`]).
 ///
 /// ```ignore
-/// current.with_live_vault(&state.sessions, f).map_err(read_error)?
+/// current.with_live_vault(&state.sessions, f).await.map_err(read_error)?
 /// ```
 pub(crate) fn read_error(err: SessionError) -> ApiError {
     match err {

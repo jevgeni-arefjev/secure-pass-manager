@@ -282,13 +282,14 @@ pub(crate) async fn add(
     StrictJson(request): StrictJson<SecretRequest>,
 ) -> Result<Response, ApiError> {
     let saved = current
-        .with_live_vault(&state.sessions, |vault| {
+        .with_live_vault(&state.sessions, move |vault| {
             if vault.contains(&request.title)? {
                 return Ok(Err(ApiError::SECRET_EXISTS));
             }
             let title = request.title.clone();
             save(vault, &title, request.into_secret(None))
         })
+        .await
         .map_err(write_error)??;
     Ok((StatusCode::CREATED, Json(saved)).into_response())
 }
@@ -316,7 +317,7 @@ pub(crate) async fn replace(
 ) -> Result<Json<SavedSecret>, ApiError> {
     let Path(title) = title.map_err(|_| ApiError::SECRET_NOT_FOUND)?;
     let saved = current
-        .with_live_vault(&state.sessions, |vault| {
+        .with_live_vault(&state.sessions, move |vault| {
             let stored = vault.get(&title)?;
             if request.title != title || request.title != stored.title() {
                 return Ok(Err(ApiError::TITLE_CHANGED));
@@ -324,6 +325,7 @@ pub(crate) async fn replace(
             let secret = request.into_secret(Some(stored));
             save(vault, &title, secret)
         })
+        .await
         .map_err(write_error)??;
     Ok(Json(saved))
 }
@@ -344,7 +346,8 @@ pub(crate) async fn remove(
 ) -> Result<StatusCode, ApiError> {
     let Path(title) = title.map_err(|_| ApiError::SECRET_NOT_FOUND)?;
     current
-        .with_live_vault(&state.sessions, |vault| vault.remove(&title))
+        .with_live_vault(&state.sessions, move |vault| vault.remove(&title))
+        .await
         .map_err(write_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -380,7 +383,7 @@ fn save(
 /// reading ([`read_error`]); a conflict has locked the session, so it never gets here.
 ///
 /// ```ignore
-/// current.with_live_vault(&state.sessions, f).map_err(write_error)?
+/// current.with_live_vault(&state.sessions, f).await.map_err(write_error)?
 /// ```
 fn write_error(err: SessionError) -> ApiError {
     match err {

@@ -236,9 +236,10 @@ pub(crate) async fn list(
     current: CurrentSession,
 ) -> Result<Json<SecretList>, ApiError> {
     let secrets = current
-        .with_live_vault(&state.sessions, |vault| {
+        .with_live_vault(&state.sessions, move |vault| {
             Ok(vault.list()?.into_iter().map(SecretSummary::of).collect())
         })
+        .await
         .map_err(read_error)?;
     Ok(Json(SecretList { secrets }))
 }
@@ -260,9 +261,10 @@ pub(crate) async fn detail(
 ) -> Result<Json<SecretDetail>, ApiError> {
     let Path(title) = title.map_err(|_| ApiError::SECRET_NOT_FOUND)?;
     let detail = current
-        .with_live_vault(&state.sessions, |vault| {
+        .with_live_vault(&state.sessions, move |vault| {
             Ok(SecretDetail::of(vault.get(&title)?))
         })
+        .await
         .map_err(read_error)?;
     Ok(Json(detail))
 }
@@ -333,9 +335,10 @@ pub(crate) async fn reveal(
 ) -> Result<Response, ApiError> {
     let Path(title) = title.map_err(|_| ApiError::SECRET_NOT_FOUND)?;
     let value = current
-        .with_live_vault(&state.sessions, |vault| {
+        .with_live_vault(&state.sessions, move |vault| {
             Ok(vault.reveal(&title, |secret| hidden_value(secret, &request.field)))
         })
+        .await
         .map_err(read_error)?
         .map_err(|err| match err {
             RevealError::Session(err) => read_error(err),

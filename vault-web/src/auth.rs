@@ -11,7 +11,7 @@ use vault_core::storage::FileStore;
 
 use crate::AppState;
 use crate::api::ApiError;
-use crate::sessions::{SessionId, SessionKey, Sessions, WebSession};
+use crate::sessions::{SessionId, SessionKey, Sessions, WebSession, off_worker};
 
 /// The session cookie's name. The `__Host-` prefix makes browsers insist on `Secure`,
 /// `Path=/` and no `Domain`, so no other host can set or read it.
@@ -97,6 +97,7 @@ pub(crate) fn is_state_changing(method: &Method) -> bool {
 /// ```ignore
 /// async fn lock(current: CurrentSession) -> Response { .. }
 /// ```
+#[derive(Clone)]
 pub(crate) struct CurrentSession {
     /// The session's registry key, the SHA-256 of its ID.
     key: SessionKey,
@@ -123,17 +124,45 @@ impl CurrentSession {
         &self.session
     }
 
-    /// Runs `f` on this session's vault, and keeps the session only while it is live.
+    /// Runs `f` on this session's vault on the blocking pool, and keeps the session
+    /// only while it is live. How a handler reaches its vault from async code; a job
+    /// already on the blocking pool uses [`CurrentSession::with_live_vault_blocking`].
     ///
     /// Security: the vault is the one this session unlocked, never one named by the
     /// request. If the vault is locked afterwards (it auto-locked since the lookup, or
     /// `f` locked it, e.g. on a save conflict), the session is removed from `sessions`
-    /// and wiped, and the result is [`SessionError::Locked`] whatever `f` returned.
+    /// and wiped, and the result is [`SessionError::Locked`] whatever `f` returned. The
+    /// vault mutex and file I/O stay off the async worker threads ([`off_worker`]).
     ///
     /// ```ignore
-    /// let count = current.with_live_vault(&state.sessions, |vault| Ok(vault.list()?.len()))?;
+    /// let count = current
+    ///     .with_live_vault(&state.sessions, |vault| Ok(vault.list()?.len()))
+    ///     .await?;
     /// ```
-    pub(crate) fn with_live_vault<R>(
+    pub(crate) async fn with_live_vault<R, F>(
+        &self,
+        sessions: &Arc<Sessions>,
+        f: F,
+    ) -> Result<R, SessionError>
+    where
+        R: Send + 'static,
+        F: FnOnce(&mut Session<FileStore>) -> Result<R, SessionError> + Send + 'static,
+    {
+        let current = self.clone();
+        let sessions = Arc::clone(sessions);
+        off_worker(move || current.with_live_vault_blocking(&sessions, f)).await
+    }
+
+    /// [`CurrentSession::with_live_vault`] on the calling thread, for a job already on
+    /// the blocking pool (e.g. a KDF job).
+    ///
+    /// Blocks while another request holds the vault, and `f` may do file I/O; never
+    /// call it on an async worker thread.
+    ///
+    /// ```ignore
+    /// state.kdf.run(move || current.with_live_vault_blocking(&sessions, f)).await
+    /// ```
+    pub(crate) fn with_live_vault_blocking<R>(
         &self,
         sessions: &Sessions,
         f: impl FnOnce(&mut Session<FileStore>) -> Result<R, SessionError>,
@@ -150,8 +179,8 @@ impl CurrentSession {
 impl FromRequestParts<AppState> for CurrentSession {
     type Rejection = ApiError;
 
-    /// Looks the cookie's session up and, on a state-changing request, checks the
-    /// CSRF token.
+    /// Looks the cookie's session up (on the blocking pool: the liveness check takes
+    /// the vault mutex) and, on a state-changing request, checks the CSRF token.
     ///
     /// ```ignore
     /// let current = CurrentSession::from_request_parts(&mut parts, &state).await?;
@@ -163,7 +192,10 @@ impl FromRequestParts<AppState> for CurrentSession {
         let key = request_session_id(&parts.headers)
             .ok_or(ApiError::LOCKED)?
             .key();
-        let session = state.sessions.get(key).ok_or(ApiError::LOCKED)?;
+        let sessions = Arc::clone(&state.sessions);
+        let session = off_worker(move || sessions.get(key))
+            .await
+            .ok_or(ApiError::LOCKED)?;
         if is_state_changing(&parts.method) {
             let token = parts
                 .headers

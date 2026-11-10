@@ -69,7 +69,8 @@ pub(crate) async fn read(
 ) -> Result<Json<AuditLog>, ApiError> {
     let limit = limit(query.as_deref())?;
     let lines = current
-        .with_live_vault(&state.sessions, |vault| vault.audit_log(limit))
+        .with_live_vault(&state.sessions, move |vault| vault.audit_log(limit))
+        .await
         .map_err(read_error)?;
     Ok(Json(AuditLog {
         events: lines.into_iter().map(AuditEvent).collect(),

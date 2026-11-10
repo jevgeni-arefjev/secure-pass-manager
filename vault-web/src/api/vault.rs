@@ -27,7 +27,7 @@ use vault_core::storage::{FileStore, Vaultname};
 use crate::api::{ApiError, internal_error, kdf_error, session_internal_error};
 use crate::auth::{self, CurrentSession};
 use crate::json::{MasterPasswordField, StrictJson};
-use crate::sessions::{IssueRefused, Issued, WebSession};
+use crate::sessions::{IssueRefused, Issued, WebSession, off_worker};
 use crate::{AppState, SessionTag};
 
 /// Allowed idle timeouts, in minutes.
@@ -111,7 +111,7 @@ pub(crate) async fn create(
         .await
         .map_err(kdf_error)?;
     let vault = created.map_err(create_error)?;
-    open_session(&state, &headers, vault, idle_timeout, StatusCode::CREATED)
+    open_session(&state, &headers, vault, idle_timeout, StatusCode::CREATED).await
 }
 
 /// Maps a create failure: a field error for an invalid vaultname or a weak master
@@ -172,7 +172,7 @@ pub(crate) async fn unlock(
         .await
         .map_err(kdf_error)?;
     let vault = unlocked.map_err(unlock_error)?;
-    open_session(&state, &headers, vault, idle_timeout, StatusCode::OK)
+    open_session(&state, &headers, vault, idle_timeout, StatusCode::OK).await
 }
 
 /// Maps an unlock failure: the person's mistake (a wrong vaultname or master password,
@@ -195,14 +195,17 @@ fn unlock_error(err: SessionError) -> ApiError {
 }
 
 /// `POST /api/lock`: locks the session, wipes its keys, deletes the cookie and tells
-/// the browser to clear its cache and storage (204).
+/// the browser to clear its cache and storage (204). Locking waits for any other
+/// request of the session to release the vault, on the blocking pool.
 ///
 /// ```text
 /// POST /api/lock   (cookie, X-CSRF-Token)
 /// 204   Set-Cookie: __Host-session=; ...; Max-Age=0   Clear-Site-Data: "cache", "storage"
 /// ```
 pub(crate) async fn lock(State(state): State<AppState>, current: CurrentSession) -> Response {
-    state.sessions.remove(current.key());
+    let sessions = Arc::clone(&state.sessions);
+    let key = current.key();
+    off_worker(move || sessions.remove(key)).await;
     (StatusCode::NO_CONTENT, auth::ended_session_headers()).into_response()
 }
 
@@ -220,24 +223,31 @@ pub(crate) async fn session(current: CurrentSession) -> Response {
 /// Registers the unlocked `vault` as a new session and builds the response: `status`,
 /// the new cookie and the session info. A session the request's cookie named is
 /// locked and removed first. 503 if the server is stopping (the vault is locked).
+/// Both run on the blocking pool: locking a session waits for its vault and writes
+/// the audit log.
 ///
 /// Security: always a new session ID, so a cookie planted or held before unlock is
 /// never accepted afterwards (session fixation).
 ///
 /// ```ignore
-/// open_session(&state, &headers, vault, idle_timeout, StatusCode::OK)
+/// open_session(&state, &headers, vault, idle_timeout, StatusCode::OK).await
 /// ```
-fn open_session(
+async fn open_session(
     state: &AppState,
     headers: &HeaderMap,
     vault: Session<FileStore>,
     idle_timeout: Duration,
     status: StatusCode,
 ) -> Result<Response, ApiError> {
-    if let Some(previous) = auth::request_session_id(headers) {
-        state.sessions.remove(previous.key());
-    }
-    let issued = state.sessions.insert(vault, idle_timeout);
+    let previous = auth::request_session_id(headers).map(|id| id.key());
+    let sessions = Arc::clone(&state.sessions);
+    let issued = off_worker(move || {
+        if let Some(previous) = previous {
+            sessions.remove(previous);
+        }
+        sessions.insert(vault, idle_timeout)
+    })
+    .await;
     issued_session(issued, status)
 }
 

@@ -11,6 +11,10 @@
 //! - A session that has auto-locked (idle timeout) or outlived the absolute lifetime is
 //!   removed and wiped on its next lookup, or by the periodic sweep, whichever comes
 //!   first.
+//!
+//! Every method that takes a session's vault mutex (a lookup, a lock, a request's
+//! vault work) may wait for another request's save, backup or master password change,
+//! so async code runs it through [`off_worker`], never on an async worker thread.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -223,6 +227,9 @@ impl WebSession {
     /// Runs `f` on the vault under the session's mutex; [`SessionError::Locked`]
     /// without running it if the vault is already locked.
     ///
+    /// Blocks while another request holds the vault, and `f` may do file I/O; run it on
+    /// the blocking pool ([`off_worker`]).
+    ///
     /// ```ignore
     /// let count = session.with_vault(|vault| Ok(vault.list()?.len()))?;
     /// ```
@@ -236,6 +243,10 @@ impl WebSession {
     /// Whether the vault is still unlocked; auto-locks it first if the idle timeout has
     /// passed. Checking doesn't count as activity.
     ///
+    /// Takes the vault mutex, so it blocks while another request holds the vault (an
+    /// auto-lock also writes the audit log); run it on the blocking pool
+    /// ([`off_worker`]).
+    ///
     /// ```ignore
     /// if !session.is_unlocked() { sessions.remove(key) }
     /// ```
@@ -244,6 +255,9 @@ impl WebSession {
     }
 
     /// Locks the vault and wipes its keys; later calls do nothing.
+    ///
+    /// Blocks while another request holds the vault; run it on the blocking pool
+    /// ([`off_worker`]).
     ///
     /// ```ignore
     /// session.lock();
@@ -326,6 +340,8 @@ impl Sessions {
     /// (recorded as a termination signal) instead, so an unlock that finished while the
     /// server was stopping can't leave a vault open.
     ///
+    /// Locking writes the audit log; run it on the blocking pool.
+    ///
     /// ```ignore
     /// let (id, session) = sessions.insert(vault, idle_timeout)?;
     /// ```
@@ -351,6 +367,8 @@ impl Sessions {
     /// so a cookie or token taken before the change is useless afterwards. The old
     /// session is removed whatever happens: if no new ID or token can be made, it is
     /// locked rather than left usable under the old ones.
+    ///
+    /// Blocks while another request holds the vault; run it on the blocking pool.
     ///
     /// ```ignore
     /// let (id, session) = sessions.reissue(current.key())?;
@@ -421,6 +439,8 @@ impl Sessions {
     /// The live session under `key`. A session that has auto-locked or outlived the
     /// absolute lifetime is removed, wiped and reported as absent.
     ///
+    /// Blocks while a request holds the session's vault; run it on the blocking pool.
+    ///
     /// ```ignore
     /// let session = sessions.get(id.key()).ok_or(ApiError::LOCKED)?;
     /// ```
@@ -435,6 +455,8 @@ impl Sessions {
     }
 
     /// Removes the session under `key`, if any, and locks it.
+    ///
+    /// Blocks while a request holds the session's vault; run it on the blocking pool.
     ///
     /// ```ignore
     /// sessions.remove(current.key());
@@ -509,6 +531,31 @@ impl Sessions {
     /// ```
     fn map(&self) -> MutexGuard<'_, HashMap<SessionKey, Arc<WebSession>>> {
         self.map.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Runs `job` on Tokio's blocking pool and returns its result; a panic in `job`
+/// resumes in the caller, so `catch_panic` still ends the request's session.
+///
+/// Security: vault work (a session's mutex, file I/O, the storage lock's wait of up to
+/// 5 s) goes through here, so a slow vault never stalls an async worker thread and with
+/// it every other request, other vaults' included.
+///
+/// ```ignore
+/// let session = off_worker(move || sessions.get(key)).await;
+/// ```
+pub(crate) async fn off_worker<R, F>(job: F) -> R
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    match tokio::task::spawn_blocking(job).await {
+        Ok(result) => result,
+        Err(err) => match err.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            // Only when the runtime shuts down mid-request.
+            Err(_) => panic!("blocking job cancelled"),
+        },
     }
 }
 

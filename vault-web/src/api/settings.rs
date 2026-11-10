@@ -72,7 +72,7 @@ pub(crate) async fn change_master_password(
     let reissued = state
         .kdf
         .run(move || {
-            let changed = current.with_live_vault(&sessions, |vault| {
+            let changed = current.with_live_vault_blocking(&sessions, |vault| {
                 vault.change_master_password(&current_master_password.0, &new_master_password.0)
             });
             match changed {
@@ -113,7 +113,8 @@ pub(crate) async fn backup(
     current: CurrentSession,
 ) -> Result<Response, ApiError> {
     let file = current
-        .with_live_vault(&state.sessions, |vault| vault.backup_file())
+        .with_live_vault(&state.sessions, move |vault| vault.backup_file())
+        .await
         .map_err(read_error)?;
     let name = format!(
         "attachment; filename=\"{}-r{}.vault\"",
