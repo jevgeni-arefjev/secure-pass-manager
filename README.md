@@ -47,7 +47,7 @@ Course deliverables:
 │   ├── tests/audit.rs      # file audit sink behaviour, through the AuditSink trait
 │   ├── tests/backup.rs     # backup destinations, Session::backup and Session::backup_file, through the public API
 │   ├── tests/generator.rs  # password generator behaviour, through its public API
-│   ├── tests/memory.rs     # page locking of every secret type, the zeroize-only fallback and its warning, core dumps off (`RLIMIT_CORE` 0, non-dumpable)
+│   ├── tests/memory.rs     # page locking of the master password, vault key, decrypted body and hidden values (plain fields are zeroize-only), the zeroize-only fallback and its warning, core dumps off (`RLIMIT_CORE` 0, non-dumpable)
 │   └── src/
 │       ├── lib.rs
 │       ├── crypto.rs       # Encryption: password KDF, key wrap, body AEAD, zeroizing secrets (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256)

@@ -1,6 +1,8 @@
 //! Memory handling of secrets, observed from outside the process's code: page locking
-//! (`mlock`) of every secret type, the zeroize-only fallback when the OS refuses to
-//! lock, its one warning, and disabled core dumps (`RLIMIT_CORE` and the dumpable flag).
+//! (`mlock`) of every locked secret type (master password, vault key, decrypted body,
+//! hidden values; plain fields are zeroize-only), the zeroize-only fallback when the
+//! OS refuses to lock, its one warning, and disabled core dumps (`RLIMIT_CORE` and the
+//! dumpable flag).
 //!
 //! The limits and flag changed here (`RLIMIT_MEMLOCK`, `RLIMIT_CORE`,
 //! `PR_SET_DUMPABLE`) are process-wide, so this file holds a single test that runs its

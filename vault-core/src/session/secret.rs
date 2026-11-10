@@ -2,7 +2,10 @@
 //! the validation every saved secret must pass and its JSON form inside the body.
 //!
 //! Security: hidden values live in page-locked, zeroizing memory ([`HiddenValue`]);
-//! every other field is a [`Zeroizing`] string, wiped when dropped but not locked.
+//! every other field (title, username, URL, notes, tags, custom field names and plain
+//! values) is a [`Zeroizing`] string, wiped when dropped but not locked, so it may be
+//! paged to swap. The spec's threat model accepts this: sensitive text belongs in a
+//! hidden field.
 //! Nothing here implements `Debug`, `Display` or `Clone`, so a hidden value can only
 //! leave through an explicit [`HiddenValue::reveal`].
 
