@@ -146,8 +146,8 @@ async fn a_panicking_request_is_a_generic_500_and_ends_its_session() {
     }
 }
 
-/// Makes a request panic on the `nth` clock call and checks the response and that only
-/// its session ended.
+/// Makes a request panic on the `nth` clock call and checks the response, that only its
+/// session ended and that no `locked` event was written (ADR-0014).
 ///
 /// ```text
 /// a_request_panicking_on_now_call(2).await;
@@ -170,7 +170,7 @@ async fn a_request_panicking_on_now_call(nth: usize) {
     assert_eq!(request_line(&logs)["status"], 500, "{logs}");
     assert!(!logs.contains("on purpose"), "{logs}");
     assert_eq!(app.session_count(), 1);
-    assert!(app.audit_log("alice").contains("\"locked\""));
+    assert!(!app.audit_log("alice").contains("\"locked\""));
     let response = app.send(alice.get("/api/secrets")).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let response = app.send(bob.get("/api/secrets")).await;

@@ -268,6 +268,22 @@ impl WebSession {
         }
     }
 
+    /// Wipes the vault's keys without recording anything in the audit log; later calls
+    /// do nothing.
+    ///
+    /// Security: for a request that panicked (ADR-0014). There is no reliable "locked"
+    /// to record mid-panic, so the session is dropped, as the CLI does.
+    ///
+    /// Blocks while another request holds the vault; run it on the blocking pool
+    /// ([`off_worker`]).
+    ///
+    /// ```ignore
+    /// session.end_after_panic();
+    /// ```
+    fn end_after_panic(&self) {
+        drop(self.vault().take());
+    }
+
     /// Locks the vault and wipes its keys because the server is stopping, recorded in
     /// the audit log as a termination signal; later calls do nothing.
     ///
@@ -465,6 +481,24 @@ impl Sessions {
         let removed = self.map().remove(&key);
         if let Some(session) = removed {
             session.lock();
+        }
+    }
+
+    /// Removes the session under `key`, if any, and wipes its keys without an audit
+    /// event ([`WebSession::end_after_panic`]).
+    ///
+    /// Security: only for a session whose request panicked (ADR-0014); every other end
+    /// of a session is a [`Sessions::remove`], which records the lock.
+    ///
+    /// Blocks while a request holds the session's vault; run it on the blocking pool.
+    ///
+    /// ```ignore
+    /// sessions.end_after_panic(key); // in catch_panic
+    /// ```
+    pub(crate) fn end_after_panic(&self, key: SessionKey) {
+        let removed = self.map().remove(&key);
+        if let Some(session) = removed {
+            session.end_after_panic();
         }
     }
 

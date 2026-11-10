@@ -143,10 +143,11 @@ fn is_same_origin(request: &Request) -> bool {
 
 /// Catches a panic anywhere below it (handler, extractor or inner middleware) and
 /// answers a generic 500 instead of dropping the connection. The session the request's
-/// cookie named is removed and locked, and the response deletes the cookie.
+/// cookie named is removed and its keys wiped, and the response deletes the cookie.
 ///
 /// Security: a request that panicked may have left its session's vault half-used, so
-/// the session ends rather than staying open. The response and the log carry no
+/// the session ends rather than staying open. No audit event is written (ADR-0014):
+/// there is no reliable "locked" to record mid-panic. The response and the log carry no
 /// panic message (it could hold request data); only an `event = "request_panicked"`
 /// line, plus whatever the process panic hook prints.
 ///
@@ -165,10 +166,10 @@ pub(crate) async fn catch_panic(
             tracing::error!(event = "request_panicked");
             let mut response = ApiError::INTERNAL.into_response();
             if let Some(key) = key {
-                // On the blocking pool: locking waits for any other request of this
+                // On the blocking pool: wiping waits for any other request of this
                 // session to release the vault (a mutex poisoned by the panic is
                 // recovered).
-                let _ = tokio::task::spawn_blocking(move || sessions.remove(key)).await;
+                let _ = tokio::task::spawn_blocking(move || sessions.end_after_panic(key)).await;
                 response.headers_mut().extend(auth::ended_session_headers());
             }
             response

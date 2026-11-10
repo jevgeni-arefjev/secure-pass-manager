@@ -252,3 +252,29 @@ async fn a_change_beyond_the_kdf_limit_is_turned_away_with_503_after_the_rules()
     holding.await.unwrap().unwrap();
     assert_eq!(app.send(alice.session()).await.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn a_panic_in_the_change_ends_the_session_without_an_audit_event() {
+    let app = TestApp::new();
+    let alice = app.create_vault("alice").await;
+    // Calls 1 and 2 are the session lookup (2 with the vault locked); call 3 is the
+    // first inside the KDF job, before the change touches the vault.
+    app.clock.panic_on_now_call(3);
+
+    let response = app.send(change(&alice, PASSWORD, NEW_PASSWORD)).await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(set_cookie(&response).unwrap().contains("Max-Age=0"));
+    assert_eq!(
+        body_json(response).await,
+        json!({"error": "internal error"})
+    );
+    assert_eq!(app.session_count(), 0);
+    let response = app.send(alice.get("/api/secrets")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let log = app.audit_log("alice");
+    assert!(!log.contains("\"locked\""), "{log}");
+    assert!(!log.contains("master_password_changed"), "{log}");
+    let response = app.send(unlock_with("alice", PASSWORD)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}

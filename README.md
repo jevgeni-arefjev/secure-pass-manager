@@ -85,9 +85,9 @@ Course deliverables:
 │   ├── tests/unlock.rs     # create, unlock, lock: cookie, CSRF, Origin, generic unlock failure, master password rules, KDF limiter (503; cheap create checks first), strict parsing, log contents, a storage failure on unlock (generic 500 with an `internal_error` line, not a 401)
 │   ├── tests/secrets.rs    # list and detail: no hidden values, titles in URLs (percent-encoded, unusual characters), 404, one vault per session
 │   ├── tests/reveal.rs     # reveal: one hidden value per request, CSRF, 404 for unknown title/field, plain fields refused, audit event, nothing in logs
-│   ├── tests/expiry.rs     # sweeper (idle timeout, 8 h lifetime), activity keeping a session open, lock all on shutdown, panicking request (500, session locked)
+│   ├── tests/expiry.rs     # sweeper (idle timeout, 8 h lifetime), activity keeping a session open, lock all on shutdown, panicking request (500, session wiped, no audit event)
 │   ├── tests/edit.rs       # add, edit, delete: generated password, 409 taken title, unchanged hidden values kept, no rename, every field problem of a refused secret listed (`fields`) and edge cases, strict parsing, CSRF, audit events, full vault (413, session stays open), save conflict locks (401), storage failure (generic 500, one `internal_error` log line)
-│   ├── tests/master_password.rs # change master password: new one only after, rules before the KDF, 503, wrong current one audited and the third in a row locks, other sessions locked, session reissued, CSRF, nothing in logs
+│   ├── tests/master_password.rs # change master password: new one only after, rules before the KDF, 503, wrong current one audited and the third in a row locks, other sessions locked, session reissued, a panic in the change ends the session, CSRF, nothing in logs
 │   ├── tests/backup.rs     # backup download: the stored vault file byte for byte, file name with revision, audited, CSRF, locks after another session saved
 │   ├── tests/audit_log.rs  # audit log: newest first, limit (default 20, capped at 1000), unreadable lines marked, no field values, own vault only
 │   ├── tests/tls.rs        # certificate loading, self-signed generation, 0600 cache and reuse
@@ -98,7 +98,7 @@ Course deliverables:
 │       ├── config.rs       # app config (the test seam): vault directory, clock, KDF limits, session lifetime, sweep interval, port, vault format, assets
 │       ├── args.rs         # flags: --bind (loopback only), --vault-dir, --tls-cert/--tls-key
 │       ├── tls.rs          # rustls (ring) config from given PEM files or a cached self-signed localhost certificate (rcgen)
-│       ├── middleware.rs   # request log (method, route template, status, latency, session hash), panic catcher (generic 500, session locked), Host and Origin checks, security headers and CSP
+│       ├── middleware.rs   # request log (method, route template, status, latency, session hash), panic catcher (generic 500, session wiped without an audit event), Host and Origin checks, security headers and CSP
 │       ├── api.rs          # `/api` routes and JSON errors (`{"error"}`, optional `"field"`; a refused secret lists every problem in `"fields"`; every 500 but a panic logs an `internal_error` line)
 │       ├── api/vault.rs    # POST /api/vaults (create), /api/unlock, /api/lock; GET /api/session
 │       ├── api/secrets.rs  # GET /api/secrets (list), /api/secrets/{title} (detail): hidden fields named, never sent; POST /api/secrets/{title}/reveal: one hidden field, audited

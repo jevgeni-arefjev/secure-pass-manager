@@ -268,8 +268,6 @@ pub(crate) fn read_error(err: SessionError) -> ApiError {
 pub(crate) enum Cause {
     /// An internal failure from `vault-core`, logged by its own name.
     Core(InternalCause),
-    /// A KDF job panicked on the blocking pool (`panic`; the panic hook logs where).
-    Panic,
     /// A response header couldn't be built (`response_header`).
     ResponseHeader,
     /// An error that isn't an internal failure reached a 500 anyway (`unexpected`).
@@ -287,7 +285,6 @@ impl Cause {
     const fn name(self) -> &'static str {
         match self {
             Self::Core(cause) => cause.name(),
-            Self::Panic => "panic",
             Self::ResponseHeader => "response_header",
             Self::Unexpected => "unexpected",
         }
@@ -351,8 +348,7 @@ pub(crate) fn internal_failure_error(failure: Option<InternalFailure>) -> ApiErr
     }
 }
 
-/// Maps a KDF limiter refusal: 503 when busy, 500 if the job panicked
-/// ([`Cause::Panic`]; the panic hook logs where).
+/// Maps a KDF limiter refusal: 503.
 ///
 /// ```ignore
 /// state.kdf.run(job).await.map_err(kdf_error)?
@@ -360,7 +356,6 @@ pub(crate) fn internal_failure_error(failure: Option<InternalFailure>) -> ApiErr
 pub(crate) fn kdf_error(rejected: KdfRejected) -> ApiError {
     match rejected {
         KdfRejected::Busy => ApiError::BUSY,
-        KdfRejected::Failed => internal_error(Cause::Panic, None),
     }
 }
 
