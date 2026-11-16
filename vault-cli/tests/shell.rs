@@ -235,7 +235,9 @@ fn an_empty_password_is_generated() {
         .lines()
         .find_map(|l| l.strip_prefix("password: "))
         .unwrap();
-    assert_eq!(password.chars().count(), 24);
+    // `--show` prints `\` as `\\`; generated passwords are visible ASCII, so that is
+    // the only escape to undo before counting.
+    assert_eq!(password.replace("\\\\", "\\").chars().count(), 24);
 }
 
 #[test]
