@@ -243,11 +243,11 @@ The server inherits the core's memory handling: key material, the decrypted body
 
 Rust tests run the whole HTTP app in-process (tower `oneshot`) on a temporary vault directory with a manual clock, so timeouts, the sweeper and the KDF limiter are tested without waiting. Client helpers are tested with `node:test`. CI (GitHub Actions) runs everything on macOS, Ubuntu and Fedora on every push, along with formatting, clippy, the client lint and type check, and a release build.
 
-Results on 2026-11-15 (Fedora 44):
+Results on 2026-11-25 (Fedora 44):
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| `vault-web` integration tests | 123 | all passed |
+| `vault-web` integration tests | 124 | all passed |
 | `vault-web` doc tests | 23 | all passed |
 | `web/` client tests (`npm test`) | 75 | all passed |
 | `vault-core` (shared core, see ICS0022 report) | 183 + 165 doc tests | all passed |

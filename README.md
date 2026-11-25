@@ -1,31 +1,205 @@
-# Secure App
+# Secure Password Manager
 
-This repo is a project for TalTech courses ICS0022 Secure Programming and ICS0027 Web Application Security.
+This repo is a project for TalTech courses **ICS0022 Secure Programming** and **ICS0027 Web Application Security**.
 
-It is a password manager with one shared Rust core and two front ends:
+It is a **password manager** with one shared Rust core and two front ends:
 
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
-- **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
+- **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Spec: [`web-app-security.md`](web-app-security.md)
 
-How to use both: [`USER_MANUAL.md`](USER_MANUAL.md).
+User manual for both: [`USER_MANUAL.md`](USER_MANUAL.md).
 
-> **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s), and add, edit and delete secrets (an empty password is generated on the server; an edit keeps untouched hidden fields without the browser ever holding them; a refused save shows every invalid field at once). A settings page changes the master password (checked as it is typed; three wrong current master passwords in a row lock the session; a change locks the vault's other web sessions and reissues this one) and downloads a backup (the encrypted vault file as stored, `<vaultname>-r<revision>.vault`), and an audit log page shows the vault's audit events, newest first. Sessions end server-side: a sweeper locks idle sessions and every session 8 h after unlock, SIGINT/SIGTERM lock every session before exit, a panicking request gets a generic 500 and its session is locked, and an open tab returns to the unlock page once its session has ended. Internal failures keep their cause kind (ADR-0014): the CLI shows it in words (`vault: vault storage failed (permission denied)`), and a kind it has no words for by name on the next line (``vault: the exact cause was `NotADirectory` ``), and every web 500 except a panic (which has its own `panic` events) logs one `internal_error` line with what failed and its `io::ErrorKind`, never a path, vaultname or title. The CLI prints its diagnostics as plain sentences (``vault: warning: the vault file of vault 'alice' is readable or writable by other users; run `chmod go-rw` on it``), and a panic only as `vault: internal error at <file>:<line>`, after which the vault shell wipes the session and clears the clipboard.
+**Important notice for ICS0027!**
+The decryption is happening server-side. That allows reusing core code and security features. But also, this means the server sees all user secrets, which is not really appropriate for a consumer app, so instead it is more like an intranet tool (e.g. corporate password manager, for employees to keep their work-related credentials).
 
-## Roadmap
+## Navigating this repo
 
-Course deliverables:
+Claude Code was used to assist the completion of this project. It was used to write parts of the code, all tests, decision documents, and overall in the analysis of best practices.
 
-- [x] MVP with vault at rest, encryption module, storage module & CLI module.
-- [x] Build and run instructions that work on a clean machine.
-- [x] Basic working web interface with the core flows.
-- [x] Basic secure authentication (Argon2id-based unlock, no stored hash; see ADR-0002) and secure session management.
-- [x] Application served over TLS in the development setup.
-- [x] Full input validation and sanitization on all fields.
-- [x] Structured logging of key events and secure error handling.
-- [x] Per-user access control: a session can only open the vault it unlocked (ADR-0001).
-- [x] Test cases written and passing, including input-validation edge cases and memory handling checks.
-- [x] User manual for the CLI and the web app: [`USER_MANUAL.md`](USER_MANUAL.md).
-- [x] Reports: encryption methods, memory management, authentication and security features, how SQL injection, XSS and CSRF are prevented, and test results: [`ICS0022-report.md`](ICS0022-report.md), [`ICS0027-report.md`](ICS0027-report.md).
+Important files in this repo:
+- This README: Project description, secret fields details, build and run instructions for a clean machine, project structure tree;
+- USER_MANUAL.md: User manual for app after it is installed;
+- ICS0022-report: Report for the ICS0022 course;
+- ICS0027-report: Report for the ICS0027 course;
+- docs/adr/: Large decisions on project infrastructure, documented;
+
+All other .md files are supplementary files for Claude (course instructions, terms definitions, standards, specs, etc.) to keep it aligned to the course requirements.
+
+## Project modules
+
+| Module | Crate | Course | What it does |
+| --- | --- | --- | --- |
+| Encryption | `vault-core::crypto` | ICS0022 (reused by ICS0027) | Handles encyprtion/decryption |
+| Storage | `vault-core::storage` | ICS0022 (reused by ICS0027) | Handles encrypted files |
+| Audit log | `vault-core::audit` | ICS0022 (reused by ICS0027) | Handles logging |
+| Session | `vault-core::session` | ICS0022 (reused by ICS0027) | Handles unlocking/locking and other session actions |
+| Password generator | `vault-core::generator` | ICS0022 (reused by ICS0027) | Generates passwords for the user |
+| Backup | `vault-core::backup` | ICS0022 | Handles encrypted file export (no decryption) |
+| CLI | `vault-cli` | ICS0022 | Handles user interaction |
+| Web server + client | `vault-web`, `web/` | ICS0027 | Handles GUI, request logic, web security (no encryption) |
+
+## Build and run
+
+### Prerequisites
+
+Linux or macOS. Windows is not supported. :)
+
+**Step 1:** A C toolchain and git. Rust needs a linker, and the `ring` crate (TLS in `vault-web`) needs a C compiler:
+
+```bash
+xcode-select --install                          # macOS: Xcode Command Line Tools
+sudo apt install build-essential curl git       # Debian/Ubuntu
+sudo dnf install gcc curl git                   # Fedora
+```
+
+**Step 2:** Rust 1.89 or newer (edition 2024). On a clean machine, install it with [rustup](https://rustup.rs):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustc --version                                 # 1.89 or newer
+```
+
+**ICS0027 only, Step 2.5:** Node.js 22 or newer, to build and check the browser client (`web/`). One way is [nvm](https://github.com/nvm-sh/nvm):
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source "$HOME/.nvm/nvm.sh"
+nvm install 22
+node --version                                  # v22 or newer
+```
+
+**Step 3:** Get the code:
+
+```bash
+git clone https://github.com/jevgeni-arefjev/secure-pass-manager.git
+cd secure-pass-manager
+```
+
+### CLI
+
+**Step 4:** Build the project:
+```bash
+cargo build --release               # builds the whole workspace into target/release/
+./target/release/vault init alice   # create a vault and open the vault shell on it
+./target/release/vault unlock alice # later: unlock it again
+cargo run -p vault-cli -- <command> # or build and run in one step, e.g. `cargo run -p vault-cli -- gen`
+```
+
+A session looks like this (`*` is echoed as you type the master password; hidden fields are masked):
+
+```
+$ vault unlock alice
+Master password: *********************
+vault 'alice' unlocked; it locks after 5 idle minute(s). Type `help` for commands.
+vault> save github
+Username (optional): alice
+Password (empty to generate):
+URL (optional): https://github.com
+Notes (optional):
+Tags (comma-separated, optional): work
+Add a custom field? [y/N]
+generated a 24-character password; `get <title> --copy` copies it
+secret added
+vault> get github --copy
+password copied; the clipboard clears in 20 seconds
+vault> log --limit 3
+2026-10-27 10:47:12  secret revealed 'github'
+2026-10-27 10:47:05  secret added 'github'
+2026-10-27 10:46:51  unlocked
+vault> lock
+vault locked
+```
+
+All commands are described in [`USER_MANUAL.md`](USER_MANUAL.md#2-cli) (and specified in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands)). Notes:
+
+- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux, `~/Library/Application Support/secure-pass-manager/vaults` on macOS), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
+- The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused. A hidden prompt takes up to 1024 characters; a paste that would go past that, or that holds a line break or another control character (a tab, ESC), is refused whole, and nothing is entered.
+- A new master password (`init`, `passwd`, or creating a vault on the web) must be 12-1024 characters with no control characters. Unlock accepts any master password, so an older vault whose master password breaks these rules still opens and can be given a new one with `passwd`.
+- A vault file is at most 64 MiB. A save that would go past that is refused with "vault is full" and nothing is written; remove or shorten secrets to make room.
+- The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
+- `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes, backups. It holds titles in plaintext but never a field value.
+- `backup <path>` writes an encrypted copy of the vault file to a new file outside the vault directory, e.g. `backup /media/usb/alice.vault`; it never overwrites. To restore, create a vault home and put the backup in it: `mkdir -m 700 ~/.local/share/secure-pass-manager/vaults/alice && cp /media/usb/alice.vault ~/.local/share/secure-pass-manager/vaults/alice/secrets.vault`, then `vault unlock alice`. Any vaultname works. On macOS, use the macOS vault directory above, in quotes because of the space.
+- `--copy` needs a display (X11 or Wayland on Linux, a logged-in desktop session on macOS); over plain SSH it reports that the clipboard is not available.
+- If the process is killed by a signal while waiting at the `vault>` prompt, the vault is wiped, but the terminal can be left in raw mode; type `reset` to fix it. At a hidden prompt (including the master password prompt of `init` and `unlock`) the terminal is restored before exiting.
+- An unknown command or argument at `vault>` is reported without repeating it (``vault: unknown command; type `help` for commands``), so a password pasted there by mistake isn't echoed.
+
+### Secret fields
+
+Both front ends save through the same core rules (ADR-0013); a refused save lists every invalid field at once.
+
+- The vault shell checks `save`'s title before asking for any field, then checks each answer as it is given: a refused answer is asked again with the reason (never the value), until it is valid or Ctrl-C cancels the save. Tags and custom field names are checked against those entered before them. How many tags and custom fields a secret has is checked on save.
+- An empty custom field value, hidden or not, is refused: the vault shell asks for it again, and the web form marks it on its row without sending. Leaving the username, URL, notes or tags empty means "not set".
+
+| Field | Accepts |
+| --- | --- |
+| Title | 1-64 characters; identifies the secret, so lookups (`get`, reveal, `rm`, replace on save) ignore case, surrounding spaces and Unicode composition (`café` typed either way is one secret) |
+| Username | 1-256 characters |
+| Password | 1-1024 characters, hidden |
+| URL | 1-2048 characters: an `http://` or `https://` URL with a host (`https://github.com/login`, `http://localhost:8080`), or a bare host such as `github.com` (optionally with a port and path), stored as typed. Anything else (`javascript:` and `data:` URLs, `file:`, `ssh://`, `https://` without a host) is refused: put other addresses in the notes or a custom field. A name followed only by a port is a bare host, so `javascript:80` is taken as host `javascript`, port 80, which can't run anything |
+| Notes | 1-4096 characters; may span several lines (newlines and tabs) |
+| Tags | at most 32, each 1-32 characters, no two alike ignoring case and composition |
+| Custom fields | at most 32; name 1-64 characters, unique ignoring case and composition, not a standard field name; value 1-1024 characters, hidden or not |
+
+- Lengths count characters, not bytes.
+- Fields that aren't hidden refuse control characters (notes allow newline and tab), every Unicode format character (zero-width characters, bidirectional controls, soft hyphen, tag characters, ...) and the line and paragraph separators, so nothing invisible can disguise a title or drive the terminal. They are stored NFC-normalised, and the single-line ones (all but notes) have surrounding spaces trimmed and must hold more than spaces.
+- Hidden fields (the password and hidden custom fields) are stored exactly as entered, byte for byte, surrounding spaces included; they refuse only control characters.
+- `get --show` prints a hidden value with the same visible escapes (`\u{200b}`, `\xad`) for invisible characters, and every `\` as `\\`, so an escape always stands for one character: a password typed as `a\b` shows as `a\\b`. `get --copy` copies the exact password, and the web reveal or copy gives any hidden field exactly.
+- A vault saved under older, looser rules still opens: such a secret lists, shows (with unsafe characters as visible escapes such as `\u{202e}`), reveals and deletes, but saving it is refused with a message naming the field. Fix that field and save again. A title that breaks a rule can't be fixed in place (the web edit form keeps the title read-only): recreate the secret under a new title (CLI: `get <old title>`, then `save <new title>` and enter its fields again, taking the password from `get <old title> --copy` and hidden custom fields from `--show`, where `\\` stands for one `\`; web: **Add secret**, then copy the fields over, revealing hidden ones one at a time), check it, then delete the old one (`rm <old title>`, or **Delete** on the web).
+
+### Web
+
+**Step 4:** The server embeds the client bundle at compile time, so build the client first (Node 22+), then the server:
+
+```bash
+cd web && npm ci && npm run build && cd ..   # bundle into vault-web/assets/
+cargo run -p vault-web                       # prints `vault-web: serving https://localhost:8443`
+```
+
+Open the printed URL. Without Node, `cargo run -p vault-web` still builds and runs, and serves a "client not built" page; after `npm run build`, rebuild the server to embed the bundle.
+
+- Flags: `--bind <addr:port>` (default `127.0.0.1:8443`; a loopback address only, anything else such as `0.0.0.0` is refused), `--vault-dir <path>` (default `web-vaults` in the platform data directory, apart from the CLI's `vaults`), `--tls-cert <pem>` and `--tls-key <pem>` (both or neither).
+- Without certificate flags, a self-signed certificate for `localhost` and `127.0.0.1` is generated on first start and cached (`0600`) in `web-tls/` in the platform data directory; the browser warns about it once. To avoid the warning, use [`mkcert`](https://github.com/FiloSottile/mkcert):
+
+  ```bash
+  mkcert -install                              # once: trust mkcert's local CA
+  mkcert -cert-file localhost.pem -key-file localhost-key.pem localhost 127.0.0.1
+  cargo run -p vault-web -- --tls-cert localhost.pem --tls-key localhost-key.pem
+  ```
+
+- Only requests addressed to `localhost:<port>` or `127.0.0.1:<port>` are served (DNS rebinding defence); every response carries a strict CSP with Trusted Types, short HSTS (`max-age=300`) and `Cache-Control: no-store`.
+- A backup downloaded from the settings page is the encrypted vault file and opens with the master password the vault had when it was made. There is no restore in the browser: as with the CLI, create a vault home in the vault directory (e.g. `web-vaults/alice/`, mode `700`) and put the backup in it as `secrets.vault`; any vaultname works.
+- The server refuses to start if it can't disable core dumps (`RLIMIT_CORE` = 0; on Linux also non-dumpable via `PR_SET_DUMPABLE`, so a piped crash handler gets nothing). 
+
+### Web logging
+
+Diagnostics go to stderr as JSON lines at a fixed `INFO` level (`RUST_LOG` is ignored); a failure to start is one `startup_failed` line with a fixed cause and, for a file, its kind, never the path (`{"event":"startup_failed","cause":"tls_file","kind":"NotFound"}`). Request lines hold the method, route template, status, latency and a short hash of the session ID only:
+
+  ```text
+  {"timestamp":"2026-11-08T10:00:00.000000Z","level":"INFO","event":"request","method":"GET","route":"/api/secrets/{title}","status":200,"latency_ms":1.2,"session":"3f9a1c0e"}
+  ```
+
+### Tests and checks
+
+```bash
+cargo test                          # all workspace tests
+cargo test --lib --bins --tests -- --ignored  # slow tests: the production KDF (256 MiB Argon2id)
+cargo clippy --all-targets -- -D warnings   # also requires a docstring on every item in src/
+cargo fmt --all --check
+```
+
+Client checks, from `web/` (need Node 22+):
+
+```bash
+npm ci                              # install the pinned dev tools (esbuild, TypeScript, Oxlint)
+npm run lint                        # Oxlint over src/, test/ and scripts/ (e.g. no shadowed names)
+npm run check                       # tsc --noEmit over src/ and test/
+npm test                            # node:test tests of the pure helpers
+```
+
+CI (`.github/workflows/ci.yml`) runs the same checks (`.github/actions/checks`) on macOS, Ubuntu and Fedora for every push to `main` and every pull request: formatting, clippy, both test commands, the client lint, checks and build, and a release build. The Rust steps do not require Node. `tests/memory.rs` runs on Linux only.
+
+Tests create vaults using the same KDF with much lower params (feature `insecure-test-kdf`, ADR-0005), which only test builds enable. Run tests in debug: `cargo test --release` is refused on purpose, so the test format can never end up in a release binary.
 
 ## Project layout
 
@@ -129,174 +303,3 @@ Course deliverables:
     ├── src/                # main.ts (create/unlock/list/detail/add/edit/settings/audit log pages; DOM via createElement/textContent only), api.ts (CSRF header, 401 = locked, backup download), forms.ts (idle timeout, master password rules as typed), audit-log.ts (audit events as table rows), secret-form.ts (form values → add/edit request, unchanged hidden fields, where each field problem is shown), secrets.ts (search, title paths), reveal.ts (30 s reveal, 20 s clipboard clear), session-watch.ts (session check every 30 s and when the tab returns), text.ts (escapes exactly the characters the server refuses), url.ts (http/https link allowlist)
     └── test/               # node:test tests of the pure helpers
 ```
-
-How the modules map to the specs:
-
-| Module | Crate | Course |
-| --- | --- | --- |
-| Encryption | `vault-core::crypto` | ICS0022 (reused by ICS0027) |
-| Storage | `vault-core::storage` | ICS0022 (reused by ICS0027) |
-| Audit log | `vault-core::audit` | ICS0022 (reused by ICS0027) |
-| Backup | `vault-core::backup` | ICS0022 |
-| Session | `vault-core::session` (single user in MVP) | both |
-| Password generator | `vault-core::generator` | both |
-| CLI | `vault-cli` | ICS0022 |
-| Web server + client | `vault-web`, `web/` *(create, unlock, lock, list, view, reveal, add, edit, delete, change master password, backup, audit log)* | ICS0027 |
-
-## Build and run
-
-### Prerequisites
-
-Linux or macOS. Windows is not supported, and no Windows support is planned.
-
-A C toolchain and git. Rust needs a linker, and the `ring` crate (TLS in `vault-web`) needs a C compiler:
-
-```bash
-xcode-select --install                          # macOS: Xcode Command Line Tools
-sudo apt install build-essential curl git       # Debian/Ubuntu
-sudo dnf install gcc curl git                   # Fedora
-```
-
-Rust 1.89 or newer (edition 2024). On a clean machine, install it with [rustup](https://rustup.rs):
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-rustc --version                                 # 1.89 or newer
-```
-
-Node.js 22 or newer, only to build and check the browser client (`web/`); the CLI never needs it. One way is [nvm](https://github.com/nvm-sh/nvm):
-
-```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source "$HOME/.nvm/nvm.sh"
-nvm install 22
-node --version                                  # v22 or newer
-```
-
-Then get the code:
-
-```bash
-git clone https://github.com/jevgeni-arefjev/secure-pass-manager.git
-cd secure-pass-manager
-```
-
-### CLI
-
-```bash
-cargo build --release               # builds the whole workspace into target/release/
-./target/release/vault init alice   # create a vault and open the vault shell on it
-./target/release/vault unlock alice # later: unlock it again
-cargo run -p vault-cli -- <command> # or build and run in one step, e.g. `cargo run -p vault-cli -- gen`
-```
-
-A session looks like this (`*` is echoed as you type the master password; hidden fields are masked):
-
-```
-$ vault unlock alice
-Master password: *********************
-vault 'alice' unlocked; it locks after 5 idle minute(s). Type `help` for commands.
-vault> save github
-Username (optional): alice
-Password (empty to generate):
-URL (optional): https://github.com
-Notes (optional):
-Tags (comma-separated, optional): work
-Add a custom field? [y/N]
-generated a 24-character password; `get <title> --copy` copies it
-secret added
-vault> get github --copy
-password copied; the clipboard clears in 20 seconds
-vault> log --limit 3
-2026-10-27 10:47:12  secret revealed 'github'
-2026-10-27 10:47:05  secret added 'github'
-2026-10-27 10:46:51  unlocked
-vault> lock
-vault locked
-```
-
-All commands are described in [`USER_MANUAL.md`](USER_MANUAL.md#2-cli) (and specified in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands)). Notes:
-
-- Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux, `~/Library/Application Support/secure-pass-manager/vaults` on macOS), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
-- The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused. A hidden prompt takes up to 1024 characters; a paste that would go past that, or that holds a line break or another control character (a tab, ESC), is refused whole, and nothing is entered.
-- A new master password (`init`, `passwd`, or creating a vault on the web) must be 12-1024 characters with no control characters. Unlock accepts any master password, so an older vault whose master password breaks these rules still opens and can be given a new one with `passwd`.
-- A vault file is at most 64 MiB. A save that would go past that is refused with "vault is full" and nothing is written; remove or shorten secrets to make room.
-- The keys live only in the `vault>` process. It locks after 5 idle minutes (`--idle-timeout 1-60`), and ends when locked.
-- `log [--limit 20]` shows the vault's audit log, newest first, in local time: unlocks, failed unlocks, locks, saved, removed and revealed secrets, master password changes, backups. It holds titles in plaintext but never a field value.
-- `backup <path>` writes an encrypted copy of the vault file to a new file outside the vault directory, e.g. `backup /media/usb/alice.vault`; it never overwrites. To restore, create a vault home and put the backup in it: `mkdir -m 700 ~/.local/share/secure-pass-manager/vaults/alice && cp /media/usb/alice.vault ~/.local/share/secure-pass-manager/vaults/alice/secrets.vault`, then `vault unlock alice`. Any vaultname works. On macOS, use the macOS vault directory above, in quotes because of the space.
-- `--copy` needs a display (X11 or Wayland on Linux, a logged-in desktop session on macOS); over plain SSH it reports that the clipboard is not available.
-- If the process is killed by a signal while waiting at the `vault>` prompt, the vault is wiped, but the terminal can be left in raw mode; type `reset` to fix it. At a hidden prompt (including the master password prompt of `init` and `unlock`) the terminal is restored before exiting.
-- An unknown command or argument at `vault>` is reported without repeating it (``vault: unknown command; type `help` for commands``), so a password pasted there by mistake isn't echoed.
-
-### Secret fields
-
-Both front ends save through the same core rules (ADR-0013); a refused save lists every invalid field at once.
-
-- The vault shell checks `save`'s title before asking for any field, then checks each answer as it is given: a refused answer is asked again with the reason (never the value), until it is valid or Ctrl-C cancels the save. Tags and custom field names are checked against those entered before them. How many tags and custom fields a secret has is checked on save.
-- An empty custom field value, hidden or not, is refused: the vault shell asks for it again, and the web form marks it on its row without sending. Leaving the username, URL, notes or tags empty means "not set".
-
-| Field | Accepts |
-| --- | --- |
-| Title | 1-64 characters; identifies the secret, so lookups (`get`, reveal, `rm`, replace on save) ignore case, surrounding spaces and Unicode composition (`café` typed either way is one secret) |
-| Username | 1-256 characters |
-| Password | 1-1024 characters, hidden |
-| URL | 1-2048 characters: an `http://` or `https://` URL with a host (`https://github.com/login`, `http://localhost:8080`), or a bare host such as `github.com` (optionally with a port and path), stored as typed. Anything else (`javascript:` and `data:` URLs, `file:`, `ssh://`, `https://` without a host) is refused: put other addresses in the notes or a custom field. A name followed only by a port is a bare host, so `javascript:80` is taken as host `javascript`, port 80, which can't run anything |
-| Notes | 1-4096 characters; may span several lines (newlines and tabs) |
-| Tags | at most 32, each 1-32 characters, no two alike ignoring case and composition |
-| Custom fields | at most 32; name 1-64 characters, unique ignoring case and composition, not a standard field name; value 1-1024 characters, hidden or not |
-
-- Lengths count characters, not bytes.
-- Fields that aren't hidden refuse control characters (notes allow newline and tab), every Unicode format character (zero-width characters, bidirectional controls, soft hyphen, tag characters, ...) and the line and paragraph separators, so nothing invisible can disguise a title or drive the terminal. They are stored NFC-normalised, and the single-line ones (all but notes) have surrounding spaces trimmed and must hold more than spaces.
-- Hidden fields (the password and hidden custom fields) are stored exactly as entered, byte for byte, surrounding spaces included; they refuse only control characters.
-- `get --show` prints a hidden value with the same visible escapes (`\u{200b}`, `\xad`) for invisible characters, and every `\` as `\\`, so an escape always stands for one character: a password typed as `a\b` shows as `a\\b`. `get --copy` copies the exact password, and the web reveal or copy gives any hidden field exactly.
-- A vault saved under older, looser rules still opens: such a secret lists, shows (with unsafe characters as visible escapes such as `\u{202e}`), reveals and deletes, but saving it is refused with a message naming the field. Fix that field and save again. A title that breaks a rule can't be fixed in place (the web edit form keeps the title read-only): recreate the secret under a new title (CLI: `get <old title>`, then `save <new title>` and enter its fields again, taking the password from `get <old title> --copy` and hidden custom fields from `--show`, where `\\` stands for one `\`; web: **Add secret**, then copy the fields over, revealing hidden ones one at a time), check it, then delete the old one (`rm <old title>`, or **Delete** on the web).
-
-### Tests and checks
-
-```bash
-cargo test                          # all workspace tests
-cargo test --lib --bins --tests -- --ignored  # slow tests: the production KDF (256 MiB Argon2id)
-cargo clippy --all-targets -- -D warnings   # also requires a docstring on every item in src/
-cargo fmt --all --check
-```
-
-Client checks, from `web/` (need Node 22+):
-
-```bash
-npm ci                              # install the pinned dev tools (esbuild, TypeScript, Oxlint)
-npm run lint                        # Oxlint over src/, test/ and scripts/ (e.g. no shadowed names)
-npm run check                       # tsc --noEmit over src/ and test/
-npm test                            # node:test tests of the pure helpers
-```
-
-CI (`.github/workflows/ci.yml`) runs the same checks (`.github/actions/checks`) on macOS, Ubuntu and Fedora (in a `fedora:latest` container) for every push to `main` and every pull request: formatting, clippy, both test commands, the client lint, checks and build, and a release build. The Rust steps never need Node. `tests/memory.rs` runs on Linux only.
-
-Tests create vaults in a cheap test format (feature `insecure-test-kdf`, ADR-0005), which only test builds enable. Run tests in debug: `cargo test --release` is refused on purpose, so the test format can never end up in a release binary.
-
-### Web
-
-The server embeds the client bundle at compile time, so build the client first (Node 22+), then the server:
-
-```bash
-cd web && npm ci && npm run build && cd ..   # bundle into vault-web/assets/
-cargo run -p vault-web                       # prints `vault-web: serving https://localhost:8443`
-```
-
-Open the printed URL. Without Node, `cargo run -p vault-web` still builds and runs, and serves a "client not built" page; after `npm run build`, rebuild the server to embed the bundle.
-
-- Flags: `--bind <addr:port>` (default `127.0.0.1:8443`; a loopback address only, anything else such as `0.0.0.0` is refused), `--vault-dir <path>` (default `web-vaults` in the platform data directory, apart from the CLI's `vaults`), `--tls-cert <pem>` and `--tls-key <pem>` (both or neither).
-- Without certificate flags, a self-signed certificate for `localhost` and `127.0.0.1` is generated on first start and cached (`0600`) in `web-tls/` in the platform data directory; the browser warns about it once. To avoid the warning, use [`mkcert`](https://github.com/FiloSottile/mkcert):
-
-  ```bash
-  mkcert -install                              # once: trust mkcert's local CA
-  mkcert -cert-file localhost.pem -key-file localhost-key.pem localhost 127.0.0.1
-  cargo run -p vault-web -- --tls-cert localhost.pem --tls-key localhost-key.pem
-  ```
-
-- Only requests addressed to `localhost:<port>` or `127.0.0.1:<port>` are served (DNS rebinding defence); every response carries a strict CSP with Trusted Types, short HSTS (`max-age=300`) and `Cache-Control: no-store`.
-- A backup downloaded from the settings page is the encrypted vault file and opens with the master password the vault had when it was made. There is no restore in the browser: as with the CLI, create a vault home in the vault directory (e.g. `web-vaults/alice/`, mode `700`) and put the backup in it as `secrets.vault`; any vaultname works.
-- The server refuses to start if it can't disable core dumps (`RLIMIT_CORE` = 0; on Linux also non-dumpable via `PR_SET_DUMPABLE`, so a piped crash handler gets nothing). Diagnostics go to stderr as JSON lines at a fixed `INFO` level (`RUST_LOG` is ignored); a failure to start is one `startup_failed` line with a fixed cause and, for a file, its kind, never the path (`{"event":"startup_failed","cause":"tls_file","kind":"NotFound"}`). Request lines hold the method, route template, status, latency and a short hash of the session ID only:
-
-  ```text
-  {"timestamp":"2026-11-08T10:00:00.000000Z","level":"INFO","event":"request","method":"GET","route":"/api/secrets/{title}","status":200,"latency_ms":1.2,"session":"3f9a1c0e"}
-  ```
