@@ -7,6 +7,8 @@ It is a password manager with one shared Rust core and two front ends:
 - **CLI** (ICS0022): a downloadable, local, multi-user-on-one-device app. Spec: [`secure-password-manager.md`](secure-password-manager.md)
 - **Web** (ICS0027): a server that keeps all data remotely and serves a browser UI over TLS. Currently planned as a local demo only. Spec: [`web-app-security.md`](web-app-security.md)
 
+How to use both: [`USER_MANUAL.md`](USER_MANUAL.md).
+
 > **Status:** MVP. The encryption (`vault-core::crypto`), storage (`vault-core::storage`), session (`vault-core::session`), audit log (`vault-core::audit`), backup (`vault-core::backup`) and password generator (`vault-core::generator`) modules and the CLI (`vault-cli`) are implemented and tested. The web front end (`vault-web`, `web/`) serves the client over HTTPS with the security headers and lets a browser create, unlock and lock a vault (server-side sessions, cookie, CSRF token, Origin check), list and search its secrets, view one with hidden fields masked, reveal or copy one hidden field at a time (audited; masked again after 30 s, clipboard cleared after 20 s), and add, edit and delete secrets (an empty password is generated on the server; an edit keeps untouched hidden fields without the browser ever holding them; a refused save shows every invalid field at once). A settings page changes the master password (checked as it is typed; three wrong current master passwords in a row lock the session; a change locks the vault's other web sessions and reissues this one) and downloads a backup (the encrypted vault file as stored, `<vaultname>-r<revision>.vault`), and an audit log page shows the vault's audit events, newest first. Sessions end server-side: a sweeper locks idle sessions and every session 8 h after unlock, SIGINT/SIGTERM lock every session before exit, a panicking request gets a generic 500 and its session is locked, and an open tab returns to the unlock page once its session has ended. Internal failures keep their cause kind (ADR-0014): the CLI shows it in words (`vault: vault storage failed (permission denied)`), and a kind it has no words for by name on the next line (``vault: the exact cause was `NotADirectory` ``), and every web 500 except a panic (which has its own `panic` events) logs one `internal_error` line with what failed and its `io::ErrorKind`, never a path, vaultname or title. The CLI prints its diagnostics as plain sentences (``vault: warning: the vault file of vault 'alice' is readable or writable by other users; run `chmod go-rw` on it``), and a panic only as `vault: internal error at <file>:<line>`, after which the vault shell wipes the session and clears the clipboard.
 
 ## Roadmap
@@ -22,8 +24,8 @@ Course deliverables:
 - [x] Structured logging of key events and secure error handling.
 - [x] Per-user access control: a session can only open the vault it unlocked (ADR-0001).
 - [x] Test cases written and passing, including input-validation edge cases and memory handling checks.
-- [ ] User manual for the CLI and the web app.
-- [ ] Reports: encryption methods, memory management, authentication and security features, how SQL injection, XSS and CSRF are prevented, and test results.
+- [x] User manual for the CLI and the web app: [`USER_MANUAL.md`](USER_MANUAL.md).
+- [x] Reports: encryption methods, memory management, authentication and security features, how SQL injection, XSS and CSRF are prevented, and test results: [`ICS0022-report.md`](ICS0022-report.md), [`ICS0027-report.md`](ICS0027-report.md).
 
 ## Project layout
 
@@ -31,6 +33,13 @@ Course deliverables:
 .
 ├── Cargo.toml              # workspace root
 ├── Cargo.lock              # pinned dependency versions
+├── USER_MANUAL.md          # user manual for the CLI and the web app
+├── ICS0022-report.md       # ICS0022 project report (encryption, memory management, security features, test results)
+├── ICS0027-report.md       # ICS0027 project report (encryption, authentication, SQL injection, XSS and CSRF, test results)
+├── ICS00*-checkpoint*.md   # course checkpoint submissions, each with its .pdf
+├── course-project-requirements.md # instructor requirements for both courses
+├── secure-password-manager.md     # ICS0022 spec: core and CLI
+├── web-app-security.md     # ICS0027 spec: web server and client (with its .pdf)
 ├── CONTEXT.md              # domain glossary: vault, vaultname, secret, hidden field, unlock/lock
 ├── CODING_STANDARDS.md     # judgement-call rules for writing and reviewing code (docstrings, where rules live, tests)
 ├── .github/workflows/      # CI: the same checks on macOS, Ubuntu and Fedora (container)
@@ -206,7 +215,7 @@ vault> lock
 vault locked
 ```
 
-All commands are listed in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands). Notes:
+All commands are described in [`USER_MANUAL.md`](USER_MANUAL.md#2-cli) (and specified in [`secure-password-manager.md` §5](secure-password-manager.md#5-commands)). Notes:
 
 - Vaults live in the platform data directory (`~/.local/share/secure-pass-manager/vaults` on Linux, `~/Library/Application Support/secure-pass-manager/vaults` on macOS), each in its own vault home: `vaults/<vaultname>/secrets.vault`, next to an empty lock file `secrets.lock` used while saving and its audit log `audit.log` (and `audit.log.1` once it has passed 1 MiB). `--vault-dir <path>` uses another vault directory.
 - The master password and hidden fields (e.g. stored passwords) are entered only through hidden prompts, never as arguments, and only from a terminal: piping them in is refused. A hidden prompt takes up to 1024 characters; a paste that would go past that, or that holds a line break or another control character (a tab, ESC), is refused whole, and nothing is entered.
