@@ -269,6 +269,27 @@ async fn replace_refuses_a_changed_title() {
 }
 
 #[tokio::test]
+async fn replace_finds_dot_titles_through_the_padded_path() {
+    let app = TestApp::new();
+    let alice = app.create_vault("alice").await;
+
+    for (title, path) in [(".", ".%20"), ("..", "..%20")] {
+        let add = json!({"title": title, "password": "old-pa55word"});
+        let response = app.send(alice.post_json("/api/secrets", &add)).await;
+        assert_eq!(response.status(), StatusCode::CREATED, "{title}");
+        let edit = json!({"title": title, "username": "bob", "password": {"unchanged": true}});
+        let body = expect(
+            app.send(alice.put_json(&format!("/api/secrets/{path}"), &edit))
+                .await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(body["title"], title);
+        assert_eq!(body["username"], "bob", "{title}");
+    }
+}
+
+#[tokio::test]
 async fn unchanged_without_a_stored_hidden_value_is_400() {
     let (app, alice) = with_github().await;
     let keep = json!({"unchanged": true});

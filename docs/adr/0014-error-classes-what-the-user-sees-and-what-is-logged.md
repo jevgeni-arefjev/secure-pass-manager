@@ -4,7 +4,7 @@ Every error belongs to one of four classes, and the class fixes what the person 
 
 | Class | Examples | Shown to the person | Audit event | Diagnostic |
 | --- | --- | --- | --- | --- |
-| Input mistake | invalid field, weak master password, no secret with this title, backup path already exists, invalid vaultname | A specific message naming the field and the rule, never the value | No | No |
+| Input mistake | invalid field, weak master password, no secret with this title, backup path already exists, invalid vaultname, vaultname taken | A specific message naming the field and the rule, never the value | No | No |
 | Security refusal | unlock failed, CSRF token, Origin, Host, wrong current master password | One generic message per refusal; unlock failure is the same whether or not the vaultname exists, after the same minimum delay | Unlock failed and master password change failed, if the vault exists | Web: the request log line only |
 | Session ended | locked (idle, lifetime, conflict, three wrong current master passwords) | A fixed message saying the vault is locked and must be unlocked again | The lock that ended it (auto-locked, locked on conflict, ...) | No |
 | Internal failure | file system, OS random number generator, a vault file that can't be read, a panic | A generic message (web: `internal error`, status 500). CLI: the generic message plus a cause kind in words, e.g. `vault storage failed (disk full)` | No | One line with what failed and its cause kind, e.g. `{"event":"internal_error","cause":"storage","kind":"StorageFull"}` |
@@ -27,6 +27,7 @@ A panic is an internal failure. Both front ends replace the default panic hook w
 - **Pass the full error (`io::Error` text) to the person or the log.** Rejected: OS error text can carry the path, which holds the vaultname, and a backup path the person chose.
 - **One generic message for every error.** Rejected: input mistakes need to name the rule, or the person can't fix them.
 - **A diagnostic log file for the CLI.** Rejected: another file that could leak, while the audit log already records the key events and the person running the CLI sees stderr anyway.
+- **Hide a taken vaultname when creating a vault.** Rejected: the vaultname is the account's identifier and there is no channel outside the app (such as a confirmation email) to answer through, so a create that succeeds and one that fails always differ: a vague message would still leak and would leave a person unable to tell why their create failed. Creating a vault therefore reveals that a vaultname is taken (web: `409`), as any sign-up without email verification does; only unlock hides whether a vaultname exists. Probing is slow: every create runs the 256 MiB Argon2id KDF before the name is checked, and the KDF limiter turns away requests beyond two running and two waiting (`503`).
 - **Log failed unlocks of an unknown vaultname.** Rejected (as in ADR-0010): it would create a file for every guessed name and record which vaultnames were tried. On the web the request log already shows each attempt as a `401` on the unlock route.
 
 ## Consequences

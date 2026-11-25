@@ -295,8 +295,9 @@ pub(crate) async fn add(
 }
 
 /// `PUT /api/secrets/{title}`: replaces the secret titled `title` in the session's vault
-/// as a whole and saves it at once. The body's title must be the path's and the stored
-/// one exactly (no rename, not even of case). Hidden values sent as
+/// as a whole and saves it at once. The body's title must be the stored one exactly (no
+/// rename, not even of case); the path only finds it, ignoring surrounding spaces, so
+/// the client's padded `..%20` for the title `..` still matches. Hidden values sent as
 /// `{"unchanged": true}` keep their stored value; `created_at` is kept too.
 ///
 /// Errors: 404 for an unknown title; 400 with `"field"` for a changed title, an
@@ -319,7 +320,7 @@ pub(crate) async fn replace(
     let saved = current
         .with_live_vault(&state.sessions, move |vault| {
             let stored = vault.get(&title)?;
-            if request.title != title || request.title != stored.title() {
+            if request.title != stored.title() {
                 return Ok(Err(ApiError::TITLE_CHANGED));
             }
             let secret = request.into_secret(Some(stored));
