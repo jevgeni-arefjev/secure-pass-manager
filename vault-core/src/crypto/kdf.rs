@@ -1,6 +1,7 @@
 //! Password KDF: Argon2id turns the master password into the KEK.
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
+use zeroize::Zeroizing;
 
 use super::CryptoError;
 use super::secret_memory::{LockedBytes, MasterPassword};
@@ -43,7 +44,12 @@ impl KdfParams {
 /// Derives the KEK from the master password with Argon2id, straight into locked memory.
 ///
 /// Security: costs a full Argon2id run whether or not the password is right, which is
-/// what makes guessing expensive. Argon2's working memory is zeroized by the crate.
+/// what makes guessing expensive. Argon2's working memory (256 MiB in format 1) is
+/// allocated here and zeroized when dropped, also on error or panic: the crate's own
+/// allocation is freed without being wiped, and its last block gives the KEK in one
+/// hash, its first blocks test a password guess in one hash. It isn't locked (memory
+/// lock limits are far below its size), so the OS may swap it out during the
+/// derivation.
 ///
 /// ```ignore
 /// let kek = derive_kek(&password, header.format.kdf_params(), &header.salt)?;
@@ -60,9 +66,15 @@ pub(crate) fn derive_kek(
         Some(KEY_LEN),
     )
     .expect("fixed params are valid Argon2 params");
+    let mut memory = Zeroizing::new(vec![Block::default(); params.block_count()]);
     let mut kek = LockedBytes::zeroed(KEY_LEN);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(password.as_bytes(), salt, kek.as_mut_bytes())
+        .hash_password_into_with_memory(
+            password.as_bytes(),
+            salt,
+            kek.as_mut_bytes(),
+            memory.as_mut_slice(),
+        )
         .map_err(|_| CryptoError::UnsupportedFormat)?;
     Ok(kek)
 }
