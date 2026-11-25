@@ -208,8 +208,8 @@ Tests create vaults using the same KDF with much lower params (feature `insecure
 ├── Cargo.toml              # workspace root
 ├── Cargo.lock              # pinned dependency versions
 ├── USER_MANUAL.md          # user manual for the CLI and the web app
-├── ICS0022-report.md       # ICS0022 project report (encryption, memory management, security features, test results)
-├── ICS0027-report.md       # ICS0027 project report (encryption, authentication, SQL injection, XSS and CSRF, test results)
+├── ICS0022-report.md       # ICS0022 project report (encryption, memory management, security features, test results), with its .pdf
+├── ICS0027-report.md       # ICS0027 project report (encryption, authentication, SQL injection, XSS and CSRF, test results), with its .pdf
 ├── ICS00*-checkpoint*.md   # course checkpoint submissions, each with its .pdf
 ├── course-project-requirements.md # instructor requirements for both courses
 ├── secure-password-manager.md     # ICS0022 spec: core and CLI

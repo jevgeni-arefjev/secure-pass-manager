@@ -66,7 +66,7 @@ Modules in `vault-core`:
 | `generator` | Random passwords from the OS CSPRNG |
 
 ```mermaid
-flowchart LR
+flowchart TB
   CLI -->|vaultname + master password| SE[Session] -->|master password, plaintext| ENC[Encryption]
   ENC -->|plaintext| SE
   SE -->|one revealed secret| CLI
